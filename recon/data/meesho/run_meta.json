@@ -1,0 +1,17 @@
+{
+  "program": "meesho",
+  "run_at": "2026-09-05T03:14:15",
+  "tools": {
+    "subfinder": "",
+    "dnsx": "",
+    "httpx": "",
+    "katana": "",
+    "gau": "",
+    "waybackurls": ""
+  },
+  "rate_limits": {
+    "concurrency": 5,
+    "delay": "800ms"
+  },
+  "asset_count": 7
+}

@@ -1,0 +1,5 @@
+ns1.affiliate.meesho.com
+cloud.affiliate.meesho.com
+edge.affiliate.meesho.com
+gateway.affiliate.meesho.com
+gcp.affiliate.meesho.com
