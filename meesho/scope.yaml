@@ -1,0 +1,100 @@
+# Meesho — Engagement Contract (machine-readable)
+# Source of truth: meesho/SCOPE.md (human-readable) + HackerOne program scope
+# Har hunting session se pehle: hackerone_get_program_scope + _exclusions se sync karo.
+# Last synced: 2026-09-05
+
+program:
+  handle: meesho_bbp
+  name: Meesho BBP
+  confirmed: true
+
+roots:
+  - www.meesho.com
+  - admin.meeshosupply.com
+  - supplier.meesho.com
+  - affiliate.meesho.com
+  - prod.meeshoapi.com
+  - www.valmo.in
+  - superstoreapp.meesho.com
+
+excluded:
+  - grocery-supplier.meesho.com
+  - farmiso.meeshosupply.com
+  - affiliate-c.meesho.com
+  - warehouse.meesho.com
+  - agency.meesho.com
+  - atlas.valmo.in
+  - admin.meesho.io
+  - "*.meeshogcp.in"
+  - "*.meeshoaiservices.ai"
+  - "*.meeshosupply.com"            # barring admin.meeshosupply.com
+  - "*.meeshoapi.com"               # barring prod.meeshoapi.com
+  - "Rider app"                     # app
+  - "com.valmo.ops"                 # app
+
+assets:
+  - identifier: www.meesho.com
+    type: url
+    max_severity: critical
+    scope_id: 876367
+  - identifier: com.meesho.supply
+    type: android
+    max_severity: critical
+    scope_id: 876369
+  - identifier: "1457958492"
+    type: ios
+    max_severity: critical
+    scope_id: 876370
+  - identifier: admin.meeshosupply.com
+    type: url
+    max_severity: critical
+    scope_id: 876371
+  - identifier: supplier.meesho.com
+    type: url
+    max_severity: critical
+    scope_id: 876372
+  - identifier: affiliate.meesho.com
+    type: url
+    max_severity: critical
+    scope_id: 943910
+  - identifier: prod.meeshoapi.com
+    type: api
+    max_severity: critical
+    scope_id: 944090
+  - identifier: www.valmo.in
+    type: url
+    note: logistics
+    max_severity: critical
+    scope_id: 948052
+  - identifier: com.valmo.valmo
+    type: android
+    note: Valmo
+    max_severity: critical
+    scope_id: 948053
+  - identifier: superstoreapp.meesho.com
+    type: url
+    note: grocery
+    max_severity: high
+    scope_id: 990609
+
+test_credentials:
+  supplier_panel:
+    emails:
+      - suppliertest-1@meeshoai.com
+      - suppliertest-2@meeshoai.com
+    password: "Hackerone@123$"      # SECRET — reports/evidence me kabhi mat likho
+  consumer_mobile:
+    numbers: ["6666666661", "6666666662"]
+    otp: "999999"
+
+rules:
+  - grocery_section_pincode: "440002"     # Nagpur PIN shows Superstore section
+  - cancel_orders_within_minutes: 30      # account lock risk ke baad
+  - indian_mobile_only: true              # OTP ke liye
+
+allowed:
+  methods: [GET, HEAD, OPTIONS, POST]
+  max_requests_per_minute: 60
+  max_concurrency: 5
+  destructive_actions: false
+  sqlmap: "--batch --risk 1"              # non-destructive only

@@ -1,0 +1,5 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "hackerone-analyst",
+  "instructions": ["NEXT_STEPS.md", "EMULATOR_ROOT.md", "meesho_root_report.md", "SCOPE.md", "NOTES.md"]
+}

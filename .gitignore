@@ -1,0 +1,32 @@
+# Binaries / heavy files — kabhi track nahi karna
+*.img
+*.apk
+*.zip
+*.tar
+*.gz
+*.jar
+*.exe
+*.bin
+
+# Dependencies
+node_modules/
+.opencode/node_modules/
+
+# Emulator / Android artifacts
+emulator/
+*.qcow2
+
+# Secrets — kabhi commit nahi
+.env
+*.env
+**/.env
+
+# Evidence artifacts (bina track — ephemeral)
+evidence/screenshots/*.png
+evidence/screenshots/*.webp
+
+# OS/junk
+.DS_Store
+Thumbs.db
+*.swp*.apks
+.playwright-mcp/

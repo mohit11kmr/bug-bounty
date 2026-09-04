@@ -1,0 +1,9 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Bug Bounty — opencode
+Comment=Open bug-bounty workspace with opencode in a terminal
+Exec=/home/mohit/Desktop/projects/bug-bounty/start-bugbounty.sh
+Icon=utilities-terminal
+Terminal=false
+Categories=Development;Security;
