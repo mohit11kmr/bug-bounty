@@ -30,3 +30,5 @@ evidence/screenshots/*.webp
 Thumbs.db
 *.swp*.apks
 .playwright-mcp/
+__pycache__/
+*.pyc
