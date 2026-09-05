@@ -1,0 +1,202 @@
+[
+  {
+    "score": 83,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Ffulfillment%2F3hy5q%2Fquality-dashboard"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fcataloging%2F3hy5q%2Fcatalogs"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fcataloging%2F3hy5q%2Fcatalogs%2Fbulk"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fcataloging%2F3hy5q%2Fcatalogs%2Fsingle"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fcataloging%2F3hy5q%2Fcatalogs%2Fsingle%2Fselect-category"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fcataloging%2F3hy5q%2Fimages-bulk-upload"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fcataloging%2F3hy5q%2Fproduct-optimiser"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Ffulfillment%2F3hy5q%2Forders%2Fpending"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Ffulfillment%2F3hy5q%2Freturns%2FreturnTracking-intransit"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Ffulfillment%2Fbjss4%2Forders%2Fready-to-ship"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fgrowth%2F3hy5q%2Fhome"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fgrowth%2F3hy5q%2Fnotices"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fgrowth%2F3hy5q%2Fsettings%2Fbank-details"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fgrowth%2F3hy5q%2Fsettings%2Fchange-password"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fgrowth%2F3hy5q%2Fsettings%2Flegal"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fgrowth%2F3hy5q%2Fsettings%2Flegal%2FAnti-Phishing-Policy%3Fdoc_id%3DantiPhishing"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fgrowth%2F3hy5q%2Fsettings%2Flegal%2FBranded-Packaging-Policy%3Fdoc_id%3DbrandedPackagingPolicy"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fgrowth%2F3hy5q%2Fsettings%2Fwhatsapp"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fpayouts%2F3hy5q%2Fpayments"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fpayouts%2F3hy5q%2Fsupport"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fpayouts%2F3hy5q%2Fsupport%2F4%2F32"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fservices%2F3hy5q%2Finventory"
+  },
+  {
+    "score": 63,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?redirect=%2Fpanel%2Fv3%2Fnew%2Fservices%2F3hy5q%2Finventory%3Ftab%3Dblocked"
+  },
+  {
+    "score": 58,
+    "tag": "auth",
+    "url": "https://admin.meeshosupply.com/api/google/oauth?redirect=%2F"
+  },
+  {
+    "score": 58,
+    "tag": "auth",
+    "url": "https://admin.meeshosupply.com/login?redirect=%2F"
+  },
+  {
+    "score": 58,
+    "tag": "auth",
+    "url": "https://admin.meeshosupply.com/login?redirect=https://admin.meeshosupply.com/"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v2/new/login"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v2/new/login?distinct_id=17d7534a8cd295-0b6d89ab8aa525-1f241205-186a00-17d7534a8ce31a"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/cataloging/3hy5q/catalogs"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/cataloging/3hy5q/catalogs/bulk"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/cataloging/3hy5q/catalogs/single"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/cataloging/3hy5q/catalogs/single/add"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/cataloging/3hy5q/catalogs/single/select-category"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/cataloging/3hy5q/images-bulk-upload"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/cataloging/3hy5q/product-optimiser"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/fulfillment/3hy5q/quality-dashboard"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/growth/3hy5q/settings/change-password"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/growth/www.googletagmanager.com"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/forgot-password"
+  },
+  {
+    "score": 53,
+    "tag": "api_surface",
+    "url": "https://supplier.meesho.com/panel/v3/new/root/login?referral_code=ANIL8JT89&invite_device=d-web"
+  }
+]
