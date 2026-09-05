@@ -9,6 +9,7 @@
 # =============================================================================
 set -uo pipefail
 
+export PYTHONUNBUFFERED=1
 WS="$HOME/Desktop/projects/bug-bounty"
 
 # ---- Load HackerOne Credentials (.env.h1) ----
@@ -403,35 +404,38 @@ run_complete_hunt() {
   echo ""
   sep
 
-  # Step 1: Recon Pipeline (Fast check / run)
-  echo "${P}  ${B}${BLUE}◈ [Phase 1/4]${R} ${B}Subdomain Enumeration & Alive Probing (httpx)...${R}"
-  local efile="$WS/recon/data/$target/endpoints.json"
-  if [ -s "$efile" ]; then
-    local n_urls
-    n_urls=$(grep -c '"url":' "$efile" 2>/dev/null || echo 0)
-    echo "${P}    ${GREEN}✓${R} Recon endpoints already mapped: ${B}$n_urls URLs${R}"
-  else
-    python3 "$WS/recon/recon_pipeline.py" --program "$target"
-  fi
+  # Step 1: Recon Pipeline (Subdomains + HTTP probing + Archive URLs)
+  local t1_start=$(date +%s)
+  echo "${P}  ${B}${BLUE}◈ [Phase 1/4]${R} ⚡ ${B}Subdomain Enumeration & Alive Probing (httpx)...${R}"
+  python3 "$WS/recon/recon_pipeline.py" --program "$target"
+  local t1_dur=$(( $(date +%s) - t1_start ))
+  echo "${P}    ${GREEN}✓ Phase 1 complete in ${t1_dur}s.${R}"
   echo ""
 
   # Step 2: Deep JS Miner & Secret Extraction
-  echo "${P}  ${B}${BLUE}◈ [Phase 2/4]${R} ${B}Deep JS-Mining & Client-side Route Extraction (Katana)...${R}"
+  local t2_start=$(date +%s)
+  echo "${P}  ${B}${BLUE}◈ [Phase 2/4]${R} ⚡ ${B}Deep JS-Mining & Client-side Route Extraction (Katana)...${R}"
   python3 "$WS/recon/js_miner.py" --program "$target"
+  local t2_dur=$(( $(date +%s) - t2_start ))
+  echo "${P}    ${GREEN}✓ Phase 2 complete in ${t2_dur}s.${R}"
   echo ""
 
   # Step 3: Intelligence Triage & Ranking
-  echo "${P}  ${B}${BLUE}◈ [Phase 3/4]${R} ${B}Intelligence Triage & Scoring (candidate_findings)...${R}"
+  local t3_start=$(date +%s)
+  echo "${P}  ${B}${BLUE}◈ [Phase 3/4]${R} ⚡ ${B}Intelligence Triage & Scoring (candidate_findings)...${R}"
   python3 "$WS/recon/intelligence.py" --program "$target" --top 40
+  local t3_dur=$(( $(date +%s) - t3_start ))
+  echo "${P}    ${GREEN}✓ Phase 3 complete in ${t3_dur}s.${R}"
   echo ""
 
   # Step 4: Autonomous Hunt Prompt Generation
-  echo "${P}  ${B}${BLUE}◈ [Phase 4/4]${R} ${B}Generating Pre-Filled Autonomous Hunting Prompt...${R}"
+  local t4_start=$(date +%s)
+  echo "${P}  ${B}${BLUE}◈ [Phase 4/4]${R} ⚡ ${B}Generating Pre-Filled Autonomous Hunting Prompt...${R}"
   local prompt_file="$WS/$target/AUTONOMOUS_HUNT_PROMPT.md"
-  python3 "$WS/recon/h1_client.py" --prompt "$target" >/dev/null 2>&1
-
+  python3 "$WS/recon/h1_client.py" --prompt "$target"
+  local t4_dur=$(( $(date +%s) - t4_start ))
   if [ -f "$prompt_file" ]; then
-    echo "${P}    ${GREEN}✓${R} Pre-filled hunting prompt generated: ${B}${CYAN}$prompt_file${R}"
+    echo "${P}    ${GREEN}✓${R} Pre-filled hunting prompt generated in ${t4_dur}s: ${B}${CYAN}$prompt_file${R}"
   fi
   echo ""
   sep
@@ -555,10 +559,13 @@ target_menu() {
         ;;
       2)
         echo ""
+        echo "${P}  ${CYAN}⚡ Running Recon Pipeline for '$target'...${R}"
+        local t_recon_start=$(date +%s)
         python3 "$WS/recon/recon_pipeline.py" --program "$target"
+        local t_recon_dur=$(( $(date +%s) - t_recon_start ))
         echo ""
         sep
-        read -r -p "${P}  Recon complete. Press Enter or [0] to continue..." _
+        read -r -p "${P}  ✓ Recon complete in ${t_recon_dur}s. Press Enter or [0] to continue..." _
         ;;
       3)
         echo ""
@@ -566,15 +573,21 @@ target_menu() {
         local jc
         read -r -p "${P}  Choice [1-2, or 0 to cancel]: " jc
         if [ "$jc" = "2" ]; then
+          echo "${P}  ${CYAN}⚡ Running JS Miner for '$target'...${R}"
+          local t_js_start=$(date +%s)
           python3 "$WS/recon/js_miner.py" --program "$target"
+          local t_js_dur=$(( $(date +%s) - t_js_start ))
+          echo ""
+          sep
+          read -r -p "${P}  ✓ JS Miner complete in ${t_js_dur}s. Press Enter or [0] to continue..." _
         elif [ "$jc" = "1" ]; then
           python3 "$WS/recon/js_miner.py" --program "$target" --dry-run
+          echo ""
+          sep
+          read -r -p "${P}  Dry-run complete. Press Enter or [0] to continue..." _
         else
           continue
         fi
-        echo ""
-        sep
-        read -r -p "${P}  JS Miner complete. Press Enter or [0] to continue..." _
         ;;
       4)
         echo ""
@@ -582,15 +595,21 @@ target_menu() {
         local nc
         read -r -p "${P}  Choice [1-2, or 0 to cancel]: " nc
         if [ "$nc" = "2" ]; then
+          echo "${P}  ${CYAN}⚡ Running Safe Nuclei Scan for '$target'...${R}"
+          local t_scan_start=$(date +%s)
           python3 "$WS/recon/scanner.py" --program "$target"
+          local t_scan_dur=$(( $(date +%s) - t_scan_start ))
+          echo ""
+          sep
+          read -r -p "${P}  ✓ Scan complete in ${t_scan_dur}s. Press Enter or [0] to continue..." _
         elif [ "$nc" = "1" ]; then
           python3 "$WS/recon/scanner.py" --program "$target" --dry-run
+          echo ""
+          sep
+          read -r -p "${P}  Dry-run complete. Press Enter or [0] to continue..." _
         else
           continue
         fi
-        echo ""
-        sep
-        read -r -p "${P}  Scan complete. Press Enter or [0] to continue..." _
         ;;
       5)
         echo ""

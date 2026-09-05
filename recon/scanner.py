@@ -21,7 +21,7 @@ import json
 import sqlite3
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import yaml
@@ -138,7 +138,7 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
         "-c", str(concurrency),
         "-nc",
     ]
-    for t in targets:
+    for idx, t in enumerate(targets, 1):
         # t = full URL ho sakta hai (httpx probe output se); sirf host extract karo
         if "://" in t:
             host = t.split("://", 1)[1].split("/", 1)[0]
@@ -151,14 +151,36 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
         if host_out.exists():
             host_out.unlink()
         cmd = base + ["-l", str(host_file), "-o", str(host_out)]
-        print(f"[scanner] nuclei host={host}")
-        run(cmd, dry, show_stats=True)
-        if not dry and host_out.exists():
+        print(f"[scanner] [{idx}/{len(targets)}] 🔍 Nuclei scanning host '{host}'...", flush=True)
+        if dry:
+            print(f"  $ {' '.join(cmd)}")
+            continue
+
+        t_start = datetime.now()
+        host_hits = 0
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        for line in proc.stdout:
+            try:
+                rec = json.loads(line)
+                sev = rec.get("info", {}).get("severity", "info").upper()
+                name = rec.get("info", {}).get("name", "")
+                tid = rec.get("template-id", "")
+                m_url = rec.get("matched-at") or rec.get("url", host)
+                host_hits += 1
+                print(f"  [nuclei] 🎯 [{sev}] {tid}: {name} -> {m_url}", flush=True)
+            except Exception:
+                pass
+        proc.wait()
+        dur = (datetime.now() - t_start).total_seconds()
+        if host_out.exists():
             content = host_out.read_text()
+            lines = [l for l in content.splitlines() if l.strip()]
+            host_hits = max(host_hits, len(lines))
             if content.strip():
                 with open(out_jsonl, "a") as merged:
                     merged.write(content if content.endswith("\n") else content + "\n")
             host_out.unlink(missing_ok=True)
+        print(f"  [scanner] ✓ Host '{host}' finished in {dur:.1f}s ({host_hits} findings).", flush=True)
     if not dry and out_jsonl.exists():
         n = len(out_jsonl.read_text().splitlines())
         print(f"[scanner] nuclei findings: {n} -> {out_jsonl.relative_to(BASE)}")

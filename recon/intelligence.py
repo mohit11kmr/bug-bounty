@@ -245,6 +245,8 @@ def main() -> None:
     top_simple = [{"score": x["score"], "tag": x["tag"], "url": x["url"]} for x in top]
     (data_dir / "top_priority.json").write_text(json.dumps(top_simple, indent=2))
 
+    print(f"[intel] ⚡ Prioritizing & scoring {len(endpoints)} endpoints across {len(assets)} assets...", flush=True)
+
     n_cands = cur.execute("SELECT COUNT(*) FROM candidate_findings").fetchone()[0]
     print(f"[intel] program={args.program}")
     print(f"[intel] assets={len(assets)} endpoints={len(scored)} db={db_path.name}")
@@ -254,6 +256,13 @@ def main() -> None:
     for x in scored:
         tag_counts[x["tag"]] = tag_counts.get(x["tag"], 0) + 1
     print(f"[intel] tag distribution: {dict(sorted(tag_counts.items(), key=lambda kv: -kv[1]))}")
+
+    if top:
+        print(f"\n[intel] 🏆 TOP HIGH-VALUE ATTACK SURFACES ({min(5, len(top))} shown):", flush=True)
+        for i, item in enumerate(top[:5], 1):
+            url_disp = item['url'] if len(item['url']) <= 70 else item['url'][:67] + "..."
+            print(f"  {i}. [{item['score']:3}] [{item['tag']}] {url_disp}", flush=True)
+        print("", flush=True)
 
     write_candidate_report(args.program, data_dir, con, args.top)
     con.close()

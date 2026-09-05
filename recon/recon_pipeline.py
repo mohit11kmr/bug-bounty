@@ -125,32 +125,73 @@ def collect_assets(scope: dict, raw: Path) -> list:
     httpx_out = raw / "httpx.jsonl"
 
     # 1) subdomain discovery (passive) — roots se subfinder per-domain
-    if not subfinder_out.exists():
+    if not subfinder_out.exists() or subfinder_out.stat().st_size == 0:
+        log(f"⚡ [1/3] Starting passive subdomain enumeration across {len(roots)} root targets...")
+        all_subs = set()
+        for idx, r in enumerate(roots, 1):
+            clean_root = r.lstrip("*.").strip()
+            print(f"  [recon] [{idx}/{len(roots)}] 🔍 Running subfinder on '{clean_root}'...", end="", flush=True)
+            t_start = datetime.now()
+            res = subprocess.run(["subfinder", "-d", clean_root, "-silent"],
+                                 capture_output=True, text=True, check=False)
+            found = [line.strip().lower() for line in res.stdout.splitlines() if line.strip()]
+            all_subs.update(found)
+            dur = (datetime.now() - t_start).total_seconds()
+            print(f" found {len(found)} subdomains ({dur:.1f}s)", flush=True)
         with open(subfinder_out, "w") as f:
-            for r in roots:
-                subprocess.run(["subfinder", "-d", r, "-silent"],
-                               stdout=f, stderr=subprocess.DEVNULL, check=False)
-        log(f"  subfinder: roots={len(roots)} -> subfinder.txt")
+            f.write("\n".join(sorted(all_subs)) + "\n")
+        log(f"  ✓ Total passive subdomains discovered: {len(all_subs)}")
+    else:
+        log(f"  subfinder.txt already exists ({len(subfinder_out.read_text().splitlines())} lines) — reusing")
 
     subs = set()
     if subfinder_out.exists():
         subs = {l.strip().lower() for l in subfinder_out.read_text().splitlines() if l.strip()}
-    hosts = sorted({h for h in (subs | set(roots)) if is_in_scope(h)})
-    log(f"  subdomains collected: {len(hosts)} (out-of-scope filtered)")
+    clean_roots = {str(r).lstrip("*.").strip().lower() for r in roots}
+    hosts = sorted({h for h in (subs | clean_roots) if is_in_scope(h)})
+    log(f"  ✓ Subdomains filtered for scope: {len(hosts)} valid candidate hosts")
 
     # 2) DNS resolve (light)
     if not dnsx_out.exists() and hosts:
+        log(f"🌐 [2/3] Resolving DNS for {len(hosts)} candidate hosts with dnsx...")
         with open(raw / "hosts.txt", "w") as f:
             f.write("\n".join(hosts))
         run(["dnsx", "-l", str(raw / "hosts.txt"), "-silent", "-o", str(dnsx_out)], dnsx_out)
+        res_count = len(dnsx_out.read_text().splitlines()) if dnsx_out.exists() else 0
+        log(f"  ✓ DNS resolved: {res_count}/{len(hosts)} hosts responding")
 
     # 3) HTTP probe + tech detect
-    with open(raw / "probe-in.txt", "w") as f:
+    probe_in = raw / "probe-in.txt"
+    with open(probe_in, "w") as f:
         f.write("\n".join(hosts))
-    run(["httpx", "-l", str(raw / "probe-in.txt"), "-silent",
-         "-json", "-tech-detect", "-status-code", "-title",
-         "-threads", str(RATE_LIMIT["concurrency"]), "-rate-limit", "60",
-         "-o", str(httpx_out)], httpx_out)
+    log(f"⚡ [3/3] Probing HTTP services, status & tech across {len(hosts)} hosts with httpx...")
+    
+    cmd = ["httpx", "-l", str(probe_in), "-silent",
+           "-json", "-tech-detect", "-status-code", "-title",
+           "-threads", str(RATE_LIMIT["concurrency"]), "-rate-limit", "60",
+           "-o", str(httpx_out)]
+    
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    live_count = 0
+    with open(httpx_out, "w") as out_f:
+        for line in proc.stdout:
+            out_f.write(line)
+            out_f.flush()
+            try:
+                rec = json.loads(line)
+                url = rec.get("url", "")
+                status = rec.get("status_code", "")
+                title = rec.get("title", "")
+                title_str = f" [{title[:30]}...]" if title else ""
+                tech = ", ".join(rec.get("tech", [])[:3])
+                tech_str = f" ({tech})" if tech else ""
+                live_count += 1
+                if live_count <= 25 or live_count % 10 == 0:
+                    print(f"  [alive] ✓ {url} [{status}]{tech_str}{title_str}", flush=True)
+            except Exception:
+                pass
+    proc.wait()
+    log(f"  ✓ HTTP probing complete: {live_count} live web endpoints detected")
 
     now = date.today().isoformat()
     assets = []
@@ -179,12 +220,25 @@ def collect_endpoints(scope: dict, raw: Path) -> list:
     """Endpoint[] — guide §8: url, method, source, auth_hint. Out-of-scope URLs dropped."""
     is_in_scope = make_scope_filter(scope)
     gau_out = raw / "gau.txt"
-    if not gau_out.exists():
-        with open(raw / "gau-in.txt", "w") as f:
-            f.write("\n".join(str(r) for r in scope["roots"]))
-        run(["gau", "--threads", "5", "--subs", "--o", str(gau_out), *scope["roots"]], gau_out)
+    if not gau_out.exists() or gau_out.stat().st_size == 0:
+        roots_clean = [str(r).lstrip("*.").strip() for r in scope["roots"]]
+        log(f"📜 Querying Wayback Machine, AlienVault & URLScan across {len(roots_clean)} roots...")
+        all_urls = set()
+        for idx, r in enumerate(roots_clean, 1):
+            print(f"  [archive] [{idx}/{len(roots_clean)}] 🌐 Harvesting archive URLs for '{r}'...", end="", flush=True)
+            t_start = datetime.now()
+            res = subprocess.run(["gau", "--threads", "5", "--subs", r],
+                                 capture_output=True, text=True, check=False)
+            found = [line.strip() for line in res.stdout.splitlines() if line.strip().startswith("http")]
+            in_scope_found = [u for u in found if is_in_scope(u.split("/", 3)[2].split(":")[0].lower())]
+            all_urls.update(in_scope_found)
+            dur = (datetime.now() - t_start).total_seconds()
+            print(f" found {len(in_scope_found)} in-scope URLs ({dur:.1f}s)", flush=True)
+        with open(gau_out, "w") as f:
+            f.write("\n".join(sorted(all_urls)) + "\n")
+        log(f"  ✓ Archive harvesting complete: {len(all_urls)} unique in-scope URLs collected")
     else:
-        log(f"  gau.txt exists ({len(gau_out.read_text().splitlines())} lines) — reuse")
+        log(f"  gau.txt exists ({len(gau_out.read_text().splitlines())} lines) — reusing")
 
     urls = set()
     if gau_out.exists():

@@ -22,7 +22,7 @@ import re
 import sqlite3
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
@@ -195,27 +195,37 @@ def run_katana_crawl(targets: list[str], output_jsonl: Path, rpm: int, concurren
         "-rate-limit", str(max(1, rpm // 2)),
         "-kf", "all",
         "-j",                   # jsonl format
-        "-o", str(output_jsonl),
         "-silent"
     ]
 
-    print(f"[js_miner] $ {' '.join(cmd)}")
+    print(f"[js_miner] $ {' '.join(cmd)} > {output_jsonl.name}")
     if dry_run:
         print("[js_miner] dry-run mode: katana command printed above.")
         return []
 
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-
+    print(f"[js_miner] ⚡ Crawling {len(targets)} live targets with Katana (depth=2, concurrency={concurrency})...", flush=True)
+    t_start = datetime.now()
     discovered = []
-    if output_jsonl.exists():
-        for line in output_jsonl.read_text().splitlines():
+
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    with open(output_jsonl, "w") as out_f:
+        for line in proc.stdout:
+            out_f.write(line)
+            out_f.flush()
             try:
                 rec = json.loads(line)
                 url = rec.get("request", {}).get("endpoint") or rec.get("url")
-                if url:
+                if url and url not in discovered:
                     discovered.append(url)
-            except json.JSONDecodeError:
+                    dur = (datetime.now() - t_start).total_seconds()
+                    if len(discovered) <= 30 or len(discovered) % 15 == 0:
+                        disp_url = url if len(url) <= 75 else url[:72] + "..."
+                        print(f"  [crawl] ⚡ [{len(discovered)} eps | {dur:.0f}s] {disp_url}", flush=True)
+            except Exception:
                 continue
+    proc.wait()
+    dur = (datetime.now() - t_start).total_seconds()
+    print(f"[js_miner] ✓ Katana crawl completed in {dur:.1f}s — {len(discovered)} endpoints discovered.", flush=True)
     return discovered
 
 
@@ -283,11 +293,19 @@ def mine_js_urls(js_urls: list[str], is_in_scope, max_files: int = 15) -> tuple[
     import urllib.request
     discovered_routes = set()
     all_secrets = []
-    
+
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    print(f"[js_miner] Inspecting up to {min(len(js_urls), max_files)} discovered JavaScript bundles...")
-    
-    for u in js_urls[:max_files]:
+    total_inspect = min(len(js_urls), max_files)
+    print(f"[js_miner] 📦 Inspecting up to {total_inspect} discovered JavaScript bundles for routes & secrets...", flush=True)
+
+    for idx, u in enumerate(js_urls[:max_files], 1):
+        clean_name = u.split("/")[-1].split("?")[0] or u
+        if len(clean_name) > 40:
+            clean_name = clean_name[:37] + "..."
+        print(f"  [js-bundle] [{idx}/{total_inspect}] 🔍 Analyzing '{clean_name}'...", end="", flush=True)
+        t_start = datetime.now()
+        bundle_routes = 0
+        bundle_secrets = 0
         try:
             req = urllib.request.Request(u, headers=headers)
             with urllib.request.urlopen(req, timeout=6) as resp:
@@ -299,13 +317,18 @@ def mine_js_urls(js_urls: list[str], is_in_scope, max_files: int = 15) -> tuple[
                             h = urlparse(r).netloc.split(":")[0].lower()
                             if not h or is_in_scope(h):
                                 discovered_routes.add(r)
+                                bundle_routes += 1
                         except Exception:
                             continue
                     all_secrets.extend(secrets)
+                    bundle_secrets += len(secrets)
         except Exception:
-            continue
+            pass
+        dur = (datetime.now() - t_start).total_seconds()
+        sec_info = f" | 🔑 {bundle_secrets} secrets!" if bundle_secrets else ""
+        print(f" found {bundle_routes} routes ({dur:.1f}s){sec_info}", flush=True)
 
-    print(f"[js_miner] Static JS analysis extracted: {len(discovered_routes)} routes, {len(all_secrets)} potential secrets.")
+    print(f"[js_miner] ✓ Static JS analysis extracted: {len(discovered_routes)} routes, {len(all_secrets)} potential secrets.", flush=True)
     return sorted(discovered_routes), all_secrets
 
 
