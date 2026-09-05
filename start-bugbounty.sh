@@ -10,6 +10,18 @@
 set -uo pipefail
 
 WS="$HOME/Desktop/projects/bug-bounty"
+
+# ---- Load HackerOne Credentials (.env.h1) ----
+if [ -z "${H1_USERNAME:-}" ] || [ -z "${H1_API_TOKEN:-}" ]; then
+  if [ -f "$WS/.env.h1" ]; then
+    # shellcheck disable=SC1091
+    source "$WS/.env.h1"
+  elif [ -f "$HOME/.h1_env" ]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.h1_env"
+  fi
+fi
+
 [ -n "${OPCODE_BIN:-}" ] && [ -x "$OPCODE_BIN" ] \
   || OPCODE_BIN="$HOME/.opencode/bin/opencode"
 [ -x "$OPCODE_BIN" ] || OPCODE_BIN="$(command -v opencode 2>/dev/null)"

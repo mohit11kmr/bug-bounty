@@ -24,6 +24,18 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 def get_auth_headers():
     username = os.environ.get("H1_USERNAME", "").strip()
     api_token = os.environ.get("H1_API_TOKEN", "").strip()
+
+    # Fallback to local .env.h1 if not set in environment
+    if not username or not api_token:
+        env_file = BASE_DIR / ".env.h1"
+        if env_file.exists():
+            for line in env_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("export H1_USERNAME=") or line.startswith("H1_USERNAME="):
+                    username = line.split("=", 1)[1].strip().strip('"').strip("'")
+                elif line.startswith("export H1_API_TOKEN=") or line.startswith("H1_API_TOKEN="):
+                    api_token = line.split("=", 1)[1].strip().strip('"').strip("'")
+
     if not username or not api_token:
         return None
     cred = f"{username}:{api_token}".encode("utf-8")
