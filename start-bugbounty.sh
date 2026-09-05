@@ -83,17 +83,31 @@ existing_targets() {
   done
 }
 
+check_opencode() {
+  if ! command -v "$OPCODE_BIN" >/dev/null 2>&1 && [ ! -x "$OPCODE_BIN" ]; then
+    echo ""
+    echo "  ${RED}✗ opencode binary nahi mila.${R}"
+    echo "  ${DIM}Install karne ke liye chalaayein:${R} ${C}curl -fsSL https://opencode.ai/install | bash${R}"
+    echo "  ${DIM}Ya standard terminal mode me hunt karein:${R} ${C}cd $WS/<target>${R}"
+    echo ""
+    read -r -p "  Press Enter to continue..."
+    return 1
+  fi
+  return 0
+}
+
 create_target_folder() {
-  local name="$1"
-  local tdir="$WS/$name"
+  local handle="$1"
+  local name="${2:-$handle}"
+  local tdir="$WS/$handle"
   mkdir -p "$tdir"
   if [ ! -f "$tdir/scope.yaml" ]; then
-    cat > "$tdir/scope.yaml" <<'YAML'
+    cat > "$tdir/scope.yaml" <<YAML
 # Program — Engagement Contract (machine-readable)
 # Har session: H1 scope APIs se sync karo. Test-cred/password YAHAN kabhi nahi.
 program:
-  handle: "$PROGRAM"
-  name: "$NAME"
+  handle: "$handle"
+  name: "$name"
   confirmed: false
 
 roots: []
@@ -107,12 +121,12 @@ allowed:
 YAML
   fi
   [ -f "$tdir/SCOPE.md" ] || cat > "$tdir/SCOPE.md" <<MD
-# $name — Program Scope
+# $handle — Program Scope
 
 > launcher ne naya target folder banaya. Pehle kaam: H1 scope + exclusions verify,
 > yahan roots/excluded fill karo, phir session shuru.
 MD
-  [ -f "$tdir/NOTES.md" ] || echo "# $name — Hunt Progress" > "$tdir/NOTES.md"
+  [ -f "$tdir/NOTES.md" ] || echo "# $handle — Hunt Progress" > "$tdir/NOTES.md"
 }
 
 # =============================================================================
@@ -150,6 +164,7 @@ new_scan() {
   echo ""
   title_box " START NEW SCAN "
   echo ""
+  check_opencode || return
   echo "  ${DIM}Agent naya target dhoondh raha hai —${R}"
   echo "  ${DIM}HackerOne programs scan honge, jo already${R}"
   echo "  ${DIM}workspace me hain wo skip.*${R}"
@@ -199,7 +214,9 @@ new_scan() {
   read -r -p "  ${B}Select${R} [0-$((i-1))]: " sel
 
   if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-    local handle="${candidates[$((sel-1))]%% | *}"
+    local cand="${candidates[$((sel-1))]}"
+    local handle="${cand%% | *}"
+    local prog_name="${cand#* | }"
     local fname dup
     fname="$(normalize_name "$handle")"
     # Duplicate guard: fuzzy vs existing folders
@@ -209,12 +226,17 @@ new_scan() {
     done < <(existing_targets)
     if [ -n "$dup" ]; then
       echo ""
-      echo "  ${Y}⚠`` '$fname' ka folder already hai ($dup).${R}"
+      echo "  ${Y}⚠ '$fname' ka folder already hai ($dup).${R}"
       read -r -p "  Usi me open karun? [${G}y${R}/${DIM}N${R}]: " ans
-      [[ "$ans" =~ ^[yY]$ ]] && cd "$WS/$dup"
+      if [[ "$ans" =~ ^[yY]$ ]]; then
+        cd "$WS/$dup"
+        if check_opencode; then
+          if "$OPCODE_BIN" --continue 2>/dev/null; then : else exec "$OPCODE_BIN"; fi
+        fi
+      fi
       return
     fi
-    create_target_folder "$fname"
+    create_target_folder "$fname" "$prog_name"
     echo ""
     echo "  ${G}✓${R} ${B}Target folder banaya: ${C}$fname/${R}"
     echo ""
@@ -254,10 +276,12 @@ continue_target() {
     echo ""
     echo "  ${G}✓${R} ${B}Resume: ${C}$pick/${R}"
     cd "$WS/$pick"
-    if "$OPCODE_BIN" --continue 2>/dev/null; then
-      :
-    else
-      exec "$OPCODE_BIN"
+    if check_opencode; then
+      if "$OPCODE_BIN" --continue 2>/dev/null; then
+        :
+      else
+        exec "$OPCODE_BIN"
+      fi
     fi
   else
     echo "  ${Y}Cancelled.${R}"

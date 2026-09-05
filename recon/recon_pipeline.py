@@ -45,10 +45,11 @@ def log(msg: str) -> None:
     print(f"[recon] {msg}", flush=True)
 
 
-def check_tools() -> None:
+def check_tools(skip_endpoints: bool = False) -> None:
     import shutil
     missing = []
-    for t in TOOLS:
+    required = [t for t in TOOLS if not (skip_endpoints and t == "gau")]
+    for t in required:
         if shutil.which(t) is None:
             missing.append(t)
     if missing:
@@ -65,8 +66,12 @@ def load_scope(program_dir: Path) -> dict:
 
 def run(cmd: list, out: Path) -> None:
     log(f"  $ {' '.join(cmd)}  > {out.name}")
-    with open(out, "w") as f:
-        subprocess.run(cmd, stdout=f, stderr=subprocess.DEVNULL, check=False)
+    has_output_flag = any(flag in cmd for flag in ("-o", "--o", "-output", "--output"))
+    if has_output_flag:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    else:
+        with open(out, "w") as f:
+            subprocess.run(cmd, stdout=f, stderr=subprocess.DEVNULL, check=False)
 
 
 def make_scope_filter(scope: dict):
@@ -197,9 +202,10 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--program", default="meesho", help="program folder name")
     ap.add_argument("--skip-endpoints", action="store_true", help="gau skip (slow)")
+    ap.add_argument("--skip-js", action="store_true", help="skip katana JS crawl & mining")
     args = ap.parse_args()
 
-    check_tools()
+    check_tools(skip_endpoints=args.skip_endpoints)
     program_dir = BASE / args.program
     scope = load_scope(program_dir)
 
@@ -217,10 +223,21 @@ def main() -> None:
         endpoints = collect_endpoints(scope, raw)
         write_json(data_dir / "endpoints.json", endpoints)
 
+    if not args.skip_js:
+        log("=== Phase 1b.2: Client-side JS Mining (Katana) ===")
+        js_script = RECON / "js_miner.py"
+        r = subprocess.run([sys.executable, str(js_script), "--program", args.program],
+                           cwd=str(BASE), check=False)
+
     if (data_dir / "endpoints.json").exists():
         log("=== Phase 1c: Application model ===")
-        subprocess.run([sys.executable, "recon/application_model.py", "--program", args.program],
-                       check=False)
+        app_script = RECON / "application_model.py"
+        r = subprocess.run([sys.executable, str(app_script), "--program", args.program],
+                           cwd=str(BASE), capture_output=True, text=True)
+        if r.returncode != 0:
+            log(f"  application_model.py warning: {r.stderr.strip()}")
+        else:
+            log("  application_model.json generated successfully")
 
     meta = {
         "program": args.program,

@@ -72,8 +72,10 @@ ELSE
 
 ```bash
 python3 recon/recon_pipeline.py --program <program>
-# → recon/data/<program>/raw/{subfinder,dnsx,httpx,gau}.txt
-# → recon/data/<program>/{assets,endpoints}.json
+# → recon/data/<program>/raw/{subfinder,dnsx,httpx,gau,katana_js}.txt
+# → recon/data/<program>/{assets,endpoints,js_secrets}.json
+# Standalone JS Mining:
+python3 recon/js_miner.py --program <program> [--dry-run]
 ```
 
 If/else per source — `TOOLS.md` se (mirror):
@@ -81,6 +83,7 @@ If/else per source — `TOOLS.md` se (mirror):
 IF  subdomains unknown            → subfinder → dnsx → httpx (tech+status)
 ELIF live hosts already known     → sirf httpx probe
 ELIF need archived URLs/params    → gau (endpoints.json me jata hai)
+ELIF live SPA JS routes/secrets   → katana -jc -jsl -xhr + js_miner static analysis
 ELSE move to scan
 ```
 

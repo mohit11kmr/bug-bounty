@@ -154,8 +154,19 @@ def main() -> None:
     args = ap.parse_args()
 
     data_dir = RECON / "data" / args.program
-    assets = json.loads((data_dir / "assets.json").read_text())
-    endpoints = json.loads((data_dir / "endpoints.json").read_text())
+    assets_file = data_dir / "assets.json"
+    if not assets_file.exists():
+        raise SystemExit(f"ERROR: {assets_file} nahi mila — pehle recon_pipeline chalao")
+    assets = json.loads(assets_file.read_text())
+
+    ep_file = data_dir / "endpoints.json"
+    if ep_file.exists():
+        endpoints = json.loads(ep_file.read_text())
+    else:
+        print(f"[intel] endpoints.json nahi mila — fallback: assets.json ke URLs use kar rahe hain")
+        endpoints = [{"url": a["url"], "method": "GET", "source": ["assets"], "auth_hint": "unknown",
+                      "first_seen": a.get("first_seen"), "last_seen": a.get("last_seen")}
+                     for a in assets if a.get("url")]
 
     # host -> exposure
     status_map = {}

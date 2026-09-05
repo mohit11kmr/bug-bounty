@@ -56,9 +56,10 @@ def in_scope_hosts(scope: dict) -> list[str]:
 
 
 def rate_limits(scope: dict) -> tuple[int, int]:
+    allowed = scope.get("allowed", {})
     rl = scope.get("rate_limits", {})
-    rpm = int(rl.get("rpm", 60))
-    concurrency = int(rl.get("concurrency", 5))
+    rpm = int(allowed.get("max_requests_per_minute") or rl.get("rpm", 60))
+    concurrency = int(allowed.get("max_concurrency") or rl.get("concurrency", 5))
     return rpm, concurrency
 
 
@@ -130,11 +131,21 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
             host = t.split("://", 1)[1].split("/", 1)[0]
         else:
             host = t
-        host_file = d / f"host_{host.replace('.', '_').replace(':', '_')}.txt"
+        host_safe = host.replace('.', '_').replace(':', '_')
+        host_file = d / f"host_{host_safe}.txt"
         host_file.write_text(host + "\n")
-        cmd = base + ["-l", str(host_file), "-o", str(out_jsonl)]
+        host_out = d / f"nuclei_{program}_{host_safe}_{stamp}.jsonl"
+        if host_out.exists():
+            host_out.unlink()
+        cmd = base + ["-l", str(host_file), "-o", str(host_out)]
         print(f"[scanner] nuclei host={host}")
         run(cmd, dry, show_stats=True)
+        if not dry and host_out.exists():
+            content = host_out.read_text()
+            if content.strip():
+                with open(out_jsonl, "a") as merged:
+                    merged.write(content if content.endswith("\n") else content + "\n")
+            host_out.unlink(missing_ok=True)
     if not dry and out_jsonl.exists():
         n = len(out_jsonl.read_text().splitlines())
         print(f"[scanner] nuclei findings: {n} -> {out_jsonl.relative_to(BASE)}")
@@ -146,6 +157,7 @@ def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
     """Parse nuclei JSONL -> update candidate_findings (notes + confidence), no new assets.
     Tag map from nuclei info.tags -> our candidate tag; score derives from severity."""
     db = RECON / "data" / program / "recon.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db)
     cur = con.cursor()
     # table create kar do agar intelligence se pehle chala to (pipeline order-independent)
@@ -198,10 +210,12 @@ def ffuf_check(program: str, scope: dict, host: str, wordlist: str, dry: bool) -
     rpm, concurrency = rate_limits(scope)
     d = scan_dir(program)
     stamp = date.today().isoformat()
-    out = d / f"ffuf_{host.replace('.', '_')}_{stamp}.json"
+    clean_host = host.replace("http://", "").replace("https://", "").rstrip("/")
+    scheme = "http" if host.startswith("http://") else "https"
+    out = d / f"ffuf_{clean_host.replace('.', '_')}_{stamp}.json"
     cmd = [
         "ffuf",
-        "-u", f"https://{host}/FUZZ",
+        "-u", f"{scheme}://{clean_host}/FUZZ",
         "-w", wordlist,
         "-o", str(out),
         "-of", "json",
@@ -210,7 +224,7 @@ def ffuf_check(program: str, scope: dict, host: str, wordlist: str, dry: bool) -
         "-p", "0.1",                              # ~100ms pause -> ~10 req/sec max
         "-t", str(concurrency),
     ]
-    print(f"[scanner] ffuf host={host} wordlist={Path(wordlist).name}")
+    print(f"[scanner] ffuf host={clean_host} wordlist={Path(wordlist).name}")
     run(cmd, dry)
     if not dry and out.exists():
         print(f"[scanner] ffuf output -> {out.relative_to(BASE)}")
