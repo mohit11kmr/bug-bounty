@@ -393,87 +393,172 @@ target_menu() {
 }
 
 # =============================================================================
-# Flow 1 — Start NEW scan (agent-driven target discovery)
+# Flow 1 — Start NEW scan (Direct HackerOne API + Manual + Agent)
 # =============================================================================
-new_scan() {
+new_scan_manual() {
   echo ""
-  title_box " START NEW SCAN "
-  echo ""
-  check_opencode || return
-  echo "  ${DIM}Agent naya target dhoondh raha hai —${R}"
-  echo "  ${DIM}HackerOne programs scan honge, jo already${R}"
-  echo "  ${DIM}workspace me hain wo skip.*${R}"
-  echo ""
+  echo "  ${B}Enter program handle:${R}"
+  echo "  ${DIM}(HackerOne handle e.g. shopify, uber, gitlab, airbnb, ya custom name)${R}"
+  local handle
+  read -r -p "  Handle: " handle
+  handle="$(echo "$handle" | tr -d ' ' | tr '[:upper:]' '[:lower:]')"
+  [ -z "$handle" ] && return
 
-  local out
-  echo "  ${Y}◌${R} hackerone-analyst scanning programs..."
-  out="$(timeout 240 "$OPCODE_BIN" run --agent hackerone-analyst \
-    'NEW TARGET SCAN (launcher se): HackerOne programs scan karo.
-     Rule 1: `hackerone_list_programs` chalao.
-     Rule 2: workspace existing targets ko SKIP karo (folders jisme scope.yaml hai:
-       '"$(existing_targets | tr '\n' ' ')"').
-     Rule 3: SIRF naye candidates return karo, strictly is format me, HARD STOP:
-       <handle> | <program name>
-     Har line me exactly ek ` | ` separator. Koi commentary, numbering, ya markdown nahi.
-     Agar koi naya candidate nahi mila to `NONE` print karo.' 2>&1)"
+  local fname
+  fname="$(normalize_name "$handle")"
 
-  local candidates=() line handle name
-  while IFS= read -r line; do
-    if [[ "$line" =~ ^[[:space:]]*([a-zA-Z0-9._-]+)[[:space:]]*\|[[:space:]]*(.+)$ ]]; then
-      handle="${BASH_REMATCH[1]}"; name="${BASH_REMATCH[2]}"
-      candidates+=("$handle | $name")
+  if [ -d "$WS/$fname" ] && [ -f "$WS/$fname/scope.yaml" ]; then
+    echo "  ${Y}⚠ Target '$fname' already exists in workspace.${R}"
+    read -r -p "  Usi target ka menu open karein? [Y/n]: " om
+    if [[ ! "$om" =~ ^[nN]$ ]]; then
+      target_menu "$fname"
     fi
-  done <<< "$out"
-
-  if [ "${#candidates[@]}" -eq 0 ]; then
-    echo "  ${RED}✗ Koi naya candidate parse nahi hua.${R}"
-    echo "$out" | tail -5
-    echo ""
-    read -r -p "  Dobara try? [${G}Y${R}/${DIM}n${R}]: " again
-    [[ "$again" =~ ^[nN]$ ]] || new_scan
     return
   fi
 
   echo ""
-  echo "  ${D}── naye candidates ───────────────────────────${R}"
-  local i=1 c
-  for c in "${candidates[@]}"; do
-    printf "  ${B}${C}%2d${R}   %s\n" "$i" "$c"
-    i=$((i+1))
-  done
-  printf "  ${D}%2s   %s${R}\n" "0" "Cancel"
-  echo "  ${D}──────────────────────────────────────────────${R}"
-  echo ""
-  local sel
-  read -r -p "  ${B}Select${R} [0-$((i-1))]: " sel
+  echo "  ${Y}◌${R} Setting up target workspace for '$handle'..."
 
-  if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-    local cand="${candidates[$((sel-1))]}"
-    local handle="${cand%% | *}"
-    local prog_name="${cand#* | }"
-    local fname dup
-    fname="$(normalize_name "$handle")"
-    dup=""
-    while IFS= read -r t; do
-      [ "$(normalize_name "$t")" = "$fname" ] && dup="$t" && break
-    done < <(existing_targets)
-    if [ -n "$dup" ]; then
-      echo ""
-      echo "  ${Y}⚠ '$fname' ka folder already hai ($dup).${R}"
-      read -r -p "  Usi me open karun? [${G}y${R}/${DIM}N${R}]: " ans
-      if [[ "$ans" =~ ^[yY]$ ]]; then
-        target_menu "$dup"
-      fi
-      return
+  local h1_synced=0
+  if [ -n "${H1_USERNAME:-}" ] && [ -n "${H1_API_TOKEN:-}" ]; then
+    if python3 "$WS/recon/h1_client.py" --setup "$handle" --folder "$fname" 2>/dev/null; then
+      h1_synced=1
     fi
-    create_target_folder "$fname" "$prog_name"
-    echo ""
-    echo "  ${G}✓${R} ${B}Target folder banaya: ${C}$fname/${R}"
-    target_menu "$fname"
-  else
-    echo "  ${Y}Cancelled.${R}"
   fi
-  return
+
+  if [ "$h1_synced" -eq 0 ]; then
+    create_target_folder "$fname" "$handle"
+    echo "  ${G}✓${R} Created target scaffold: ${C}$fname/${R}"
+    echo "  ${DIM}Kripya $fname/scope.yaml aur $fname/SCOPE.md me roots verify karein.${R}"
+  fi
+
+  echo ""
+  read -r -p "  Abhi recon pipeline run karein? [${G}y${R}/${DIM}N${R}]: " r_ans
+  if [[ "$r_ans" =~ ^[yY]$ ]]; then
+    python3 "$WS/recon/recon_pipeline.py" --program "$fname"
+  fi
+  target_menu "$fname"
+}
+
+new_scan() {
+  while true; do
+    clear
+    title_box " START NEW SCAN / TARGET PROVISIONING "
+    echo ""
+    echo "  ${B}Naya target kaise set karna chahte hain?${R}"
+    echo ""
+    opt "1" "Auto-Discover from HackerOne" "H1 credentials se available programs fetch & filter"
+    opt "2" "Enter Program Handle Manually" "e.g. shopify, uber, gitlab, custom target"
+    opt "3" "AI Agent Discovery (OpenCode)"  "run autonomous hackerone-analyst agent"
+    opt "0" "Back to Main Menu"             ""
+    echo ""
+    local n_mode
+    read -r -p "  ${B}Choice${R} [0-3]: " n_mode
+
+    case "$n_mode" in
+      1)
+        if [ -z "${H1_USERNAME:-}" ] || [ -z "${H1_API_TOKEN:-}" ]; then
+          echo ""
+          echo "  ${Y}⚠ H1_USERNAME ya H1_API_TOKEN environment variables set nahi hain.${R}"
+          echo "  ${DIM}Auto-discovery ke liye H1 credentials zaroori hain:${R}"
+          echo "    export H1_USERNAME=\"...\" && export H1_API_TOKEN=\"...\""
+          echo ""
+          read -r -p "  Manual handle enter karna chahte hain? [${G}Y${R}/${DIM}n${R}]: " mh
+          if [[ ! "$mh" =~ ^[nN]$ ]]; then
+            new_scan_manual
+            return
+          fi
+          continue
+        fi
+
+        echo ""
+        echo "  ${Y}◌${R} Fetching available HackerOne programs..."
+        local raw_json
+        raw_json=$(python3 "$WS/recon/h1_client.py" --list --json 2>/dev/null)
+        if [ -z "$raw_json" ] || [ "$raw_json" = "[]" ]; then
+          echo "  ${RED}✗ Koi naya program fetch nahi hua ya network issue hai.${R}"
+          read -r -p "  Press Enter to continue..."
+          continue
+        fi
+
+        local handles=() names=() bounties=()
+        while IFS='|' read -r h n b; do
+          [ -n "$h" ] && handles+=("$h") && names+=("$n") && bounties+=("$b")
+        done < <(python3 -c "
+import json, sys
+data = json.loads('''$raw_json''')
+for p in data:
+    b = '💰 Bounty' if p.get('offers_bounties') else 'ℹ VDP'
+    print(f\"{p['handle']}|{p['name']}|{b}\")
+")
+
+        local count="${#handles[@]}"
+        if [ "$count" -eq 0 ]; then
+          echo "  ${Y}Koi naya program nahi mila (sab already workspace me hain).${R}"
+          read -r -p "  Press Enter..."
+          continue
+        fi
+
+        clear
+        title_box " HACKERONE PROGRAMS DISCOVERED ($count) "
+        echo ""
+        echo "  ${DIM}Select a program to automatically generate its target workspace:${R}"
+        echo ""
+        local i
+        for ((i=0; i<count; i++)); do
+          printf "  ${B}${C}%2d${R}   ${B}%-18s${R} %-30s ${DIM}%s${R}\n" "$((i+1))" "${handles[$i]}" "${names[$i]}" "${bounties[$i]}"
+        done
+        printf "  ${D}%2s   %s${R}\n" "0" "Cancel"
+        echo ""
+        local sel
+        read -r -p "  ${B}Select program [0-$count]:${R} " sel
+
+        if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "$count" ]; then
+          local picked_handle="${handles[$((sel-1))]}"
+          echo ""
+          echo "  ${Y}◌${R} Provisioning target workspace for '${picked_handle}'..."
+          python3 "$WS/recon/h1_client.py" --setup "$picked_handle"
+          local folder_name
+          folder_name="$(normalize_name "$picked_handle")"
+          echo ""
+          echo "  ${G}✓ Target folder configured: ${C}$folder_name/${R}"
+          read -r -p "  Abhi recon pipeline run karein? [${G}y${R}/${DIM}N${R}]: " r_ans
+          if [[ "$r_ans" =~ ^[yY]$ ]]; then
+            python3 "$WS/recon/recon_pipeline.py" --program "$folder_name"
+          fi
+          target_menu "$folder_name"
+          return
+        fi
+        ;;
+
+      2)
+        new_scan_manual
+        return
+        ;;
+
+      3)
+        if ! check_opencode; then
+          echo ""
+          read -r -p "  Press Enter to return..."
+          continue
+        fi
+        echo "  ${Y}◌${R} Running hackerone-analyst agent..."
+        local out
+        out="$(timeout 240 "$OPCODE_BIN" run --agent hackerone-analyst \
+          'NEW TARGET SCAN: List new target candidates not already in workspace' 2>&1)"
+        echo "$out"
+        read -r -p "  Press Enter to continue..."
+        ;;
+
+      0)
+        return
+        ;;
+
+      *)
+        echo "  ${RED}Invalid choice.${R}"; sleep 1
+        ;;
+    esac
+  done
 }
 
 # =============================================================================

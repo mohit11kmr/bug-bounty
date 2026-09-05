@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "hackerone-analyst",
+  "instructions": ["SCOPE.md", "NOTES.md", "NEXT_STEPS.md", "EMULATOR_ROOT.md", "meesho_root_report.md"],
+  "skills": {
+    "paths": [
+      "/home/mohit/.config/opencode/skills/bug-bounty",
+      "/home/mohit/.config/opencode/skills/research",
+      "/home/mohit/.config/opencode/skills/secure-coding"
+    ]
+  },
+  "mcp": {
+    "hackerone": {
+      "type": "local",
+      "command": ["npx", "-y", "hackerone-mcp@latest"],
+      "environment": {
+        "H1_USERNAME": "{env:H1_USERNAME}",
+        "H1_API_TOKEN": "{env:H1_API_TOKEN}"
+      },
+      "enabled": true
+    }
+  },
+  "permission": {
+    "*": "allow",
+    "bash": "allow",
+    "external_directory": "allow"
+  }
+}
