@@ -38,10 +38,23 @@ DEFAULT_RUN_ON = "live"  # "live" = 200/30x hosts only, "all" = har asset, "list
 
 
 def load_scope(program: str) -> dict:
+    import re
     scope_file = BASE / program / "scope.yaml"
     if not scope_file.exists():
         sys.exit(f"[scanner] scope.yaml nahi mila: {scope_file}")
-    return yaml.safe_load(scope_file.read_text())
+    raw = scope_file.read_text(encoding="utf-8")
+    try:
+        return yaml.safe_load(raw)
+    except Exception:
+        fixed_lines = []
+        for line in raw.splitlines():
+            if re.match(r'^\s*-\s*[\*\?].*', line):
+                prefix = line[:line.index('-') + 2]
+                val = line.strip()[1:].strip().strip('"').strip("'")
+                fixed_lines.append(f'{prefix}"{val}"')
+            else:
+                fixed_lines.append(line)
+        return yaml.safe_load("\n".join(fixed_lines))
 
 
 def in_scope_hosts(scope: dict) -> list[str]:

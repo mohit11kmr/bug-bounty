@@ -57,11 +57,23 @@ def check_tools(skip_endpoints: bool = False) -> None:
 
 
 def load_scope(program_dir: Path) -> dict:
-    import yaml
+    import yaml, re
     scope_file = program_dir / "scope.yaml"
     if not scope_file.exists():
         sys.exit(f"ERROR: {scope_file} not found — pehle scope.yaml banao")
-    return yaml.safe_load(scope_file.read_text())
+    raw = scope_file.read_text(encoding="utf-8")
+    try:
+        return yaml.safe_load(raw)
+    except Exception:
+        fixed_lines = []
+        for line in raw.splitlines():
+            if re.match(r'^\s*-\s*[\*\?].*', line):
+                prefix = line[:line.index('-') + 2]
+                val = line.strip()[1:].strip().strip('"').strip("'")
+                fixed_lines.append(f'{prefix}"{val}"')
+            else:
+                fixed_lines.append(line)
+        return yaml.safe_load("\n".join(fixed_lines))
 
 
 def run(cmd: list, out: Path) -> None:

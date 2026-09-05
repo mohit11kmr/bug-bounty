@@ -154,10 +154,27 @@ def main() -> None:
     args = ap.parse_args()
 
     data_dir = RECON / "data" / args.program
+    data_dir.mkdir(parents=True, exist_ok=True)
     assets_file = data_dir / "assets.json"
     if not assets_file.exists():
-        raise SystemExit(f"ERROR: {assets_file} nahi mila — pehle recon_pipeline chalao")
-    assets = json.loads(assets_file.read_text())
+        scope_yaml = BASE / args.program / "scope.yaml"
+        if scope_yaml.exists():
+            import yaml, re
+            raw = scope_yaml.read_text(encoding="utf-8")
+            try:
+                sc = yaml.safe_load(raw)
+            except Exception:
+                fixed_lines = [f'{line[:line.index("-")+2]}"{line.strip()[1:].strip().strip(chr(34)).strip(chr(39))}"' if re.match(r'^\s*-\s*[\*\?].*', line) else line for line in raw.splitlines()]
+                sc = yaml.safe_load("\n".join(fixed_lines)) or {}
+            roots = sc.get("roots", [])
+            assets = [{"host": str(r).lstrip("*.").strip(), "url": f"https://{str(r).lstrip('*.').strip()}", "status": 200} for r in roots]
+            if not assets:
+                raise SystemExit(f"ERROR: {assets_file} nahi mila — pehle recon_pipeline chalao")
+            print(f"[intel] assets.json nahi mila — fallback: scope.yaml roots ({len(assets)}) use kar rahe hain")
+        else:
+            raise SystemExit(f"ERROR: {assets_file} nahi mila — pehle recon_pipeline chalao")
+    else:
+        assets = json.loads(assets_file.read_text())
 
     ep_file = data_dir / "endpoints.json"
     if ep_file.exists():

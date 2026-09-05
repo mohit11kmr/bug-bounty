@@ -208,15 +208,21 @@ def setup_target(handle, folder_name=None, force=False):
         host_target = clean_target.split("/")[0] if "/" in clean_target else clean_target
         
         if asset_type in ("url", "domain", "wildcard", "api", "cidr") and not is_third_party:
+            sub_targets = [s.strip().strip('"').strip("'") for s in host_target.split(",") if s.strip()]
             if eligible and max_sev != "none":
-                if host_target not in roots:
-                    roots.append(host_target)
+                for st in sub_targets:
+                    if st not in roots:
+                        roots.append(st)
             else:
-                if host_target not in excluded:
-                    excluded.append(host_target)
+                for st in sub_targets:
+                    if st not in excluded:
+                        excluded.append(st)
         elif not eligible or max_sev == "none":
-            if not is_third_party and host_target not in excluded:
-                excluded.append(host_target)
+            if not is_third_party:
+                sub_targets = [s.strip().strip('"').strip("'") for s in host_target.split(",") if s.strip()]
+                for st in sub_targets:
+                    if st not in excluded:
+                        excluded.append(st)
 
     # 1. Create scope.yaml
     scope_yaml_path = target_dir / "scope.yaml"
@@ -235,10 +241,11 @@ def setup_target(handle, folder_name=None, force=False):
         ]
         if roots:
             for r in roots:
-                yaml_lines.append(f"  - {r}")
+                clean_r = r.strip().strip('"').strip("'")
+                yaml_lines.append(f'  - "{clean_r}"')
         else:
             yaml_lines.append("  # [Action Required] Add target roots here:")
-            yaml_lines.append(f"  # - {handle}.com")
+            yaml_lines.append(f'  # - "{handle}.com"')
             
         yaml_lines.extend([
             "",
@@ -246,7 +253,8 @@ def setup_target(handle, folder_name=None, force=False):
         ])
         if excluded:
             for ex in excluded:
-                yaml_lines.append(f'  - "{ex}"')
+                clean_ex = ex.strip().strip('"').strip("'")
+                yaml_lines.append(f'  - "{clean_ex}"')
         else:
             yaml_lines.append("  []")
             
