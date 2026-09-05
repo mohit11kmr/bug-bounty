@@ -1,4 +1,46 @@
-# Binaries / heavy files — kabhi track nahi karna
+# =============================================================================
+# Bug Bounty Workspace — .gitignore
+# Policy: WORKFLOW/config/skills/scripts tracked. BOUNTY FINDINGS NEVER PUSHED.
+# =============================================================================
+
+# ---- Secrets / credentials — kabhi commit nahi ----
+.env
+*.env
+**/.env
+**/.env.*
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+*oauth*
+*credential*
+.sops.yaml
+**/scope.yaml
+**.scope.yaml
+
+# ---- Bounty FINDINGS / evidence / reports — NEVER push ----
+evidence/
+reports/
+h1_*.md
+h1_*.json
+kiwi-*
+*-report.md
+*-report.json
+priceline_progress_report/
+**/NOTES.md
+**/NEXT_STEPS.md
+**/*_root_report.md
+**/*root_report*
+
+# ---- Recon/target data (program-specific, includes recon.db + candidates) ----
+recon/data/
+**/candidate_report.md
+**/top_priority.json
+**/run_meta.json
+**/recon.db
+
+# ---- Binaries / heavy artifacts ----
 *.img
 *.apk
 *.zip
@@ -7,28 +49,19 @@
 *.jar
 *.exe
 *.bin
+*.qcow2
+*.so
+magisk_extract/
+emulator/
 
-# Dependencies
+# ---- Dependencies / runtime ----
 node_modules/
 .opencode/node_modules/
-
-# Emulator / Android artifacts
-emulator/
-*.qcow2
-
-# Secrets — kabhi commit nahi
-.env
-*.env
-**/.env
-
-# Evidence artifacts (bina track — ephemeral)
-evidence/screenshots/*.png
-evidence/screenshots/*.webp
-
-# OS/junk
-.DS_Store
-Thumbs.db
-*.swp*.apks
 .playwright-mcp/
 __pycache__/
 *.pyc
+
+# ---- OS/junk ----
+.DS_Store
+Thumbs.db
+*.swp
