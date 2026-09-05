@@ -48,6 +48,26 @@ opt() {  # aligned menu row: opt "<num>" "<label>" "<desc>"
   printf "  ${G}%s${R}  ${B}%-26s${R}${DIM}%s${R}\n" "[$1]" "$2" "$3"
 }
 
+center() {  # center a line in terminal: center "text" [colorized]
+  local txt="$1" w len
+  w="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
+  len="$(printf '%s' "$txt" | sed 's/\x1b\[[0-9;]*m//g' | wc -c)"
+  printf "%$(( (w - len) / 2 ))s%s\n" "" "$txt"
+}
+
+center_block() {  # center a multi-line art block uniformly: center_block "l1 l2 l3" color
+  local block="$1" color="$2" w max=0 len line lines=()
+  w="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
+  while IFS= read -r line; do
+    len="${#line}"
+    [ "$len" -gt "$max" ] && max="$len"
+    lines+=("$line")
+  done <<< "$block"
+  for line in "${lines[@]}"; do
+    printf "%$(( (w - max) / 2 ))s${color}%s${R}\n" "" "$line"
+  done
+}
+
 # =============================================================================
 # Helpers
 # =============================================================================
@@ -101,24 +121,25 @@ MD
 splash() {
   clear
   echo ""
-  echo "   ${C}██╗██╗██╗  ██████╗  ██████╗ ██╗██╗${R}"
-  echo "   ${C}██╗██╗██║ ██╔═══██╗██╔═══██╗██║██║${R}"
-  echo "   ${C}██╗██╗██║ ██║   ██║██████╔╝██║██║${R}"
-  echo "   ${C}██║██║██║ ██║   ██║██╔═══██╗██║██║${R}"
-  echo "   ${C}╚═╝╚═╝╚═╝ ╚██████╔╝██████╔╝╚═╝╚═╝${R}"
-  echo "   ${C}████████████████████████████████████${R}"
+  center_block "██████╗  ██████╗
+██╔══██╗██╔══██╗
+██████╔╝██████╔╝
+██╔══██╗██╔══██╗
+██████╔╝██████╔╝
+╚═════╝ ╚═════╝" "${C}"
   echo ""
-  echo "   ${B}${C}     B U G   B O U N T Y — L A U N C H E R${R}"
+  center "${B}${C}BUG BOUNTY — LAUNCHER${R}"
   echo ""
-  echo "   ${DIM}Workspace:${R}  $WS"
-  echo "   ${DIM}Targets:${R}    $(existing_targets | grep -c .) active"
-  echo "   ${DIM}Agent:${R}      hackerone-analyst (${D}HackerOne authorized hunting${R})"
+  center "${DIM}Workspace:${R}  $WS"
+  center "${DIM}Targets:${R}    $(existing_targets | grep -c .) active"
+  center "${DIM}Agent:${R}      hackerone-analyst (${D}HackerOne authorized hunting${R})"
   echo ""
-  echo "   ${LINE}──────────────────────────────────────────────${R}"
-  echo "   ${DIM}Legal first: SIRF in-scope targets.${R}"
+  center "${LINE}──────────────────────────────────────────────${R}"
+  center "${DIM}Legal first: SIRF in-scope targets.${R}"
   echo ""
   if [ "${BASH_LAUNCHER_SKIP_SPLASH:-0}" != "1" ]; then
-    read -r -s -n1 -p "   Press Enter to continue..."
+    center "Press Enter to continue..."
+    read -r -s -n1
   fi
 }
 
