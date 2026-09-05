@@ -194,6 +194,14 @@ burn). Output:
 
 Verdict bands: 0-9% SKIP · 10-24% LOW · 25-49% MEDIUM · 50-74% HIGH · 75%+ CRITICAL-HUNT.
 
+> **Hypothesis → hunter routing (external):** prob-hunter jab specific vuln-class hypothesis banaye
+> (BOLA/IDOR/SSRF/SQLi/RCE/bizlogic), to us class ka dedicated hunter agent dispatching karo —
+> wo hypothesis ka test playbook hai. Hunter agents (find-idor, find-ssrf, find-sqli, find-rce,
+> find-bizlogic, ...) ek alag project me already opencode subagents ke roop me maujood hain:
+> `bug-bountyhunt by ai with saas/.opencode/agents/` — dispatch via `task("find-<class>", target)`.
+> Kaam ka order: prob-hunter hypothesis (here) → relevant hunter agent execution → results yahan
+> manual testing (7) me verify. Value prove hone tak informal routing — koi integration code nahi.
+
 > prob-hunter sirf PADHTA hai (grep/cat), kuch edit nahi karta. Manual-testing ORDER isi se
 > decide hota hai — real finding isi list ke top me milegi. (Cost guard: LLM call hai,
 > isliye sirf shortlist par.)
