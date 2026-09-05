@@ -71,16 +71,24 @@ def list_existing_targets():
             targets.add(item.name.lower())
     return targets
 
-def list_programs(page_size=30, filter_existing=True):
+def list_programs(page_size=50, filter_existing=True, bounty_only=False, verbose=False):
     existing = list_existing_targets() if filter_existing else set()
     candidates = []
     
+    if verbose:
+        print("  [1/4] 🌐 Connecting to HackerOne API (api.hackerone.com)...", file=sys.stderr)
+        
     status, data = h1_request("/programs", {"page[size]": str(page_size)})
     if status != 200:
-        print(f"[h1_client] Error fetching programs: HTTP {status} - {data.get('error')}", file=sys.stderr)
+        print(f"  [!] Error fetching programs: HTTP {status} - {data.get('error')}", file=sys.stderr)
         return candidates
 
     programs = data.get("data", [])
+    if verbose:
+        filter_label = "Cash Bounty ($$$ Paid Only)" if bounty_only else "All Programs (Cash + VDP)"
+        print(f"  [2/4] 🔍 Querying active programs (Found {len(programs)} programs on H1)...", file=sys.stderr)
+        print(f"  [3/4] 💰 Filtering programs: [{filter_label}]...", file=sys.stderr)
+
     for p in programs:
         attrs = p.get("attributes", {})
         handle = attrs.get("handle", "")
@@ -89,6 +97,9 @@ def list_programs(page_size=30, filter_existing=True):
         bounty = attrs.get("offers_bounties", False)
         
         if not handle:
+            continue
+            
+        if bounty_only and not bounty:
             continue
             
         norm_handle = handle.lower().replace("-", "_")
@@ -102,6 +113,9 @@ def list_programs(page_size=30, filter_existing=True):
             "state": state,
             "offers_bounties": bounty
         })
+        
+    if verbose:
+        print(f"  [4/4] 🛡 Workspace check: Filtered existing targets. {len(candidates)} candidates ready.", file=sys.stderr)
         
     return candidates
 
@@ -331,12 +345,92 @@ def setup_target(handle, folder_name=None, force=False):
         "assets_count": len(assets)
     }
 
+def generate_hunt_prompt(target_dir):
+    target_path = BASE_DIR / target_dir if not isinstance(target_dir, Path) else target_dir
+    scope_yaml_file = target_path / "scope.yaml"
+    if not scope_yaml_file.exists():
+        return f"Error: {scope_yaml_file} nahi mila."
+
+    try:
+        import yaml
+        with open(scope_yaml_file, "r") as f:
+            scope_data = yaml.safe_load(f)
+    except Exception:
+        scope_data = {"roots": [], "excluded": [], "program": {"handle": target_path.name, "name": target_path.name}}
+
+    prog = scope_data.get("program", {}) if isinstance(scope_data, dict) else {}
+    handle = prog.get("handle", target_path.name)
+    name = prog.get("name", handle.capitalize())
+    roots = scope_data.get("roots", []) if isinstance(scope_data, dict) else []
+    excluded = scope_data.get("excluded", []) if isinstance(scope_data, dict) else []
+    allowed = scope_data.get("allowed", {}) if isinstance(scope_data, dict) else {}
+    rpm = allowed.get("max_requests_per_minute", 60)
+    concurrency = allowed.get("max_concurrency", 5)
+
+    cand_file = BASE_DIR / "recon" / "data" / target_path.name / "candidate_report.md"
+    top_candidates = []
+    if cand_file.exists():
+        lines = cand_file.read_text(encoding="utf-8").splitlines()
+        for line in lines:
+            if line.startswith("- ["):
+                top_candidates.append(line)
+            if len(top_candidates) >= 6:
+                break
+
+    candidates_block = "\n".join(top_candidates) if top_candidates else "- Run recon/intelligence.py first to rank candidates."
+    roots_block = "\n".join(f"  - {r}" for r in roots) if roots else "  - (Check scope.yaml)"
+    excluded_block = "\n".join(f"  - {ex}" for ex in excluded) if excluded else "  - None listed"
+
+    prompt = f"""# MISSION: Autonomous Bug Bounty Hunting — Target: {name} ({handle})
+
+You are operating in the dedicated authorized HackerOne workspace for program `{handle}`.
+Your objective is to find valid, high-impact security vulnerabilities and prepare actionable non-destructive Proof-of-Concepts (PoCs).
+
+## 1. SCOPE & LEGAL BOUNDARIES (Hard Rules)
+- IN-SCOPE TARGETS:
+{roots_block}
+
+- EXCLUDED / OUT-OF-SCOPE (Strictly forbidden — Do NOT touch):
+{excluded_block}
+
+- SAFE OPERATING LIMITS:
+  - Max rate limit: {rpm} requests/min | Concurrency: {concurrency}
+  - Destructive actions: STRICTLY PROHIBITED
+  - sqlmap: non-destructive only (`--batch --risk 1`)
+  - No DoS, no credential brute forcing, no customer data corruption.
+
+## 2. HIGH-PRIORITY ATTACK SURFACE & RECON CANDIDATES
+{candidates_block}
+
+## 3. YOUR EXECUTION PROTOCOL
+1. **Analyze Candidates**: Examine prioritized endpoints above (auth flows, admin panels, sensitive APIs).
+2. **Formulate Hypotheses**:
+   - Access Control: Test for IDOR / BOLA on IDs, user_ids, invoice parameters.
+   - Authentication Flaws: Test token validation, OAuth redirect params, SSO callback flaws.
+   - Information Disclosure: Test API endpoints for secret leakage or internal cloud bucket exposures.
+   - SSRF / Open Redirect: Test URL parameters handling redirections.
+3. **Execute Non-Destructive Verification**:
+   - Use `curl -s -i` or Burp Suite to reproduce.
+   - Record exact HTTP request & response headers.
+4. **Prepare Report Artifact**:
+   - Save PoC evidence to `evidence/findings/{handle}/`.
+   - Match with HackerOne scope_id from `scope.yaml` for triage submission.
+
+Proceed with systematic hunting now. Focus on quality, business impact, and rigorous verification!"""
+
+    out_file = target_path / "AUTONOMOUS_HUNT_PROMPT.md"
+    out_file.write_text(prompt, encoding="utf-8")
+    return prompt
+
 def main():
     parser = argparse.ArgumentParser(description="HackerOne API Client & Target Workspace Manager")
     parser.add_argument("--test-auth", action="store_true", help="Test H1 credentials")
     parser.add_argument("--list", action="store_true", help="List accessible H1 programs (excluding existing targets)")
+    parser.add_argument("--bounty-only", action="store_true", help="Filter for cash bounty paid programs only")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Print live progress steps")
     parser.add_argument("--all", action="store_true", help="Include existing targets in listing")
     parser.add_argument("--setup", type=str, metavar="HANDLE", help="Auto-scaffold a target from HackerOne")
+    parser.add_argument("--prompt", type=str, metavar="TARGET", help="Generate pre-filled autonomous hunt prompt for target")
     parser.add_argument("--folder", type=str, metavar="DIR", help="Custom folder name for target")
     parser.add_argument("--force", action="store_true", help="Force overwrite existing scope files")
     parser.add_argument("--json", action="store_true", help="Output JSON format")
@@ -348,8 +442,13 @@ def main():
         print(f"[h1_client] Auth test: {'SUCCESS' if ok else 'FAILED'} - {msg}")
         sys.exit(0 if ok else 1)
         
+    if args.prompt:
+        p = generate_hunt_prompt(args.prompt)
+        print(p)
+        return
+
     if args.list:
-        programs = list_programs(page_size=40, filter_existing=not args.all)
+        programs = list_programs(page_size=50, filter_existing=not args.all, bounty_only=args.bounty_only, verbose=args.verbose)
         if args.json:
             print(json.dumps(programs, indent=2))
         else:
