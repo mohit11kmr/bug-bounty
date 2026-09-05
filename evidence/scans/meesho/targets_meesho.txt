@@ -1,0 +1,7 @@
+admin.meeshosupply.com
+affiliate.meesho.com
+prod.meeshoapi.com
+superstoreapp.meesho.com
+supplier.meesho.com
+www.meesho.com
+www.valmo.in
