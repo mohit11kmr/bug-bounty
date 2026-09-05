@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Bug Bounty — Launcher
-# Desktop click / terminal: two flows — Start NEW scan (agent-driven) ya
-# Continue EXISTING target (session resume).
+# Bug Bounty — Mission Control & Launcher
+# Terminal / Desktop click: Live stats, target sub-menus, pre-flight diagnostics,
+# and recon diff engine.
 # =============================================================================
 set -uo pipefail
 
@@ -19,10 +19,9 @@ LINE=$'\e[38;5;245m'   # muted gray for borders
 DIM=$'\e[90m'
 
 # ---- If no tty (desktop launch) self-wrap in a terminal ----
-# (BASH_LAUNCHER_NOTTY=1 bypasses wrap — testing)
 if [ ! -t 1 ] && [ "${BASH_LAUNCHER_NOTTY:-0}" != "1" ]; then
-  exec xfce4-terminal --title="Bug Bounty — Launcher" \
-    --geometry=110x32 --working-directory="$WS" \
+  exec xfce4-terminal --title="Bug Bounty — Mission Control" \
+    --geometry=115x34 --working-directory="$WS" \
     -e "bash -lc 'exec \"$0\"'"
 fi
 
@@ -31,10 +30,8 @@ cd "$WS" || exit 1
 # =============================================================================
 # UI primitives
 # =============================================================================
-W=52   # box inner width
+W=60   # box inner width
 sep()  { printf "${LINE}%s${R}\n" "$(printf '─%.0s' $(seq 1 "$W"))"; }
-padl() { printf "%${1}s%s" "" "$2"; }          # right-pad helper (left spaces)
-sp()   { printf ' %s ' "$1"; }
 
 title_box() {  # centered title bar: title_box "text"
   local t="$1" pad
@@ -48,14 +45,14 @@ opt() {  # aligned menu row: opt "<num>" "<label>" "<desc>"
   printf "  ${G}%s${R}  ${B}%-26s${R}${DIM}%s${R}\n" "[$1]" "$2" "$3"
 }
 
-center() {  # center a line in terminal: center "text" [colorized]
+center() {
   local txt="$1" w len
   w="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
   len="$(printf '%s' "$txt" | sed 's/\x1b\[[0-9;]*m//g' | wc -c)"
   printf "%$(( (w - len) / 2 ))s%s\n" "" "$txt"
 }
 
-center_block() {  # center a multi-line art block uniformly: center_block "l1 l2 l3" color
+center_block() {
   local block="$1" color="$2" w max=0 len line lines=()
   w="${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
   while IFS= read -r line; do
@@ -69,28 +66,56 @@ center_block() {  # center a multi-line art block uniformly: center_block "l1 l2
 }
 
 # =============================================================================
-# Helpers
+# Helpers & Stats Engine
 # =============================================================================
 normalize_name() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | tr -s ' ' '_' | tr -cd 'a-z0-9_-'
 }
 
-# Targets = workspace root par folder jisme scope.yaml hai
 existing_targets() {
   local d
   for d in "$WS"/*/; do
     [ -f "$d/scope.yaml" ] && basename "$d"
   done
+  return 0
+}
+
+target_stats() {
+  local target="$1"
+  local d="$WS/recon/data/$target"
+  local a_file="$d/assets.json"
+  local e_file="$d/endpoints.json"
+  local db_file="$d/recon.db"
+
+  if [ "$target" = "general" ]; then
+    printf "${DIM}Local Lab / Practice${R}"
+    return
+  fi
+
+  local n_assets=0 n_endpoints=0 n_cands=0 top_score=0
+  [ -f "$a_file" ] && n_assets=$(grep -c '"host":' "$a_file" 2>/dev/null || echo 0)
+  [ -f "$e_file" ] && n_endpoints=$(grep -c '"url":' "$e_file" 2>/dev/null || echo 0)
+
+  if [ -f "$db_file" ] && command -v sqlite3 >/dev/null 2>&1; then
+    local row
+    row=$(sqlite3 "$db_file" "SELECT count(*), COALESCE(max(score), 0) FROM candidate_findings;" 2>/dev/null || echo "0|0")
+    n_cands=$(echo "$row" | cut -d'|' -f1)
+    top_score=$(echo "$row" | cut -d'|' -f2)
+  fi
+
+  if [ "$n_assets" -gt 0 ] || [ "$n_endpoints" -gt 0 ]; then
+    printf "${G}🟢 %s hosts · %s URLs · %s cands (Top: %s)${R}" \
+      "$n_assets" "$n_endpoints" "$n_cands" "$top_score"
+  else
+    printf "${Y}🟡 Scope ready · Scan pending${R}"
+  fi
 }
 
 check_opencode() {
   if ! command -v "$OPCODE_BIN" >/dev/null 2>&1 && [ ! -x "$OPCODE_BIN" ]; then
     echo ""
-    echo "  ${RED}✗ opencode binary nahi mila.${R}"
-    echo "  ${DIM}Install karne ke liye chalaayein:${R} ${C}curl -fsSL https://opencode.ai/install | bash${R}"
-    echo "  ${DIM}Ya standard terminal mode me hunt karein:${R} ${C}cd $WS/<target>${R}"
-    echo ""
-    read -r -p "  Press Enter to continue..."
+    echo "  ${Y}⚠ opencode binary nahi mila.${R}"
+    echo "  ${DIM}Agent features ke liye install karein:${R} ${C}curl -fsSL https://opencode.ai/install | bash${R}"
     return 1
   fi
   return 0
@@ -130,31 +155,241 @@ MD
 }
 
 # =============================================================================
-# Splash screen
+# Pre-Flight Diagnostics
 # =============================================================================
-splash() {
+diagnostics_check() {
   clear
+  title_box " PRE-FLIGHT SYSTEM DIAGNOSTICS "
   echo ""
-  center_block "██████╗  ██████╗
-██╔══██╗██╔══██╗
-██████╔╝██████╔╝
-██╔══██╗██╔══██╗
-██████╔╝██████╔╝
-╚═════╝ ╚═════╝" "${C}"
+  echo "  ${B}1. Core Security Tools:${R}"
+  local tools=("subfinder" "dnsx" "httpx" "gau" "katana" "nuclei" "ffuf" "dalfox" "sqlmap" "jadx")
+  for t in "${tools[@]}"; do
+    if command -v "$t" >/dev/null 2>&1; then
+      printf "    ${G}✓${R} %-12s ${DIM}%s${R}\n" "$t" "$(command -v "$t")"
+    else
+      printf "    ${RED}✗${R} %-12s ${RED}NOT FOUND${R}\n" "$t"
+    fi
+  done
+
   echo ""
-  center "${B}${C}BUG BOUNTY — LAUNCHER${R}"
-  echo ""
-  center "${DIM}Workspace:${R}  $WS"
-  center "${DIM}Targets:${R}    $(existing_targets | grep -c .) active"
-  center "${DIM}Agent:${R}      hackerone-analyst (${D}HackerOne authorized hunting${R})"
-  echo ""
-  center "${LINE}──────────────────────────────────────────────${R}"
-  center "${DIM}Legal first: SIRF in-scope targets.${R}"
-  echo ""
-  if [ "${BASH_LAUNCHER_SKIP_SPLASH:-0}" != "1" ]; then
-    center "Press Enter to continue..."
-    read -r -s -n1
+  echo "  ${B}2. Services & Environment:${R}"
+  if docker info >/dev/null 2>&1; then
+    printf "    ${G}✓${R} %-12s ${DIM}running${R}\n" "Docker"
+  else
+    printf "    ${Y}⚠${R} %-12s ${DIM}stopped (sudo systemctl start docker)${R}\n" "Docker"
   fi
+
+  if command -v "$OPCODE_BIN" >/dev/null 2>&1 || [ -x "$OPCODE_BIN" ]; then
+    printf "    ${G}✓${R} %-12s ${DIM}%s${R}\n" "OpenCode" "$OPCODE_BIN"
+  else
+    printf "    ${Y}⚠${R} %-12s ${DIM}not installed (curl -fsSL https://opencode.ai/install | bash)${R}\n" "OpenCode"
+  fi
+
+  echo ""
+  echo "  ${B}3. HackerOne API Credentials:${R}"
+  if [ -n "${H1_USERNAME:-}" ]; then
+    printf "    ${G}✓${R} %-14s ${DIM}%s${R}\n" "H1_USERNAME" "${H1_USERNAME:0:3}***"
+  else
+    printf "    ${Y}⚠${R} %-14s ${DIM}not set in environment${R}\n" "H1_USERNAME"
+  fi
+  if [ -n "${H1_API_TOKEN:-}" ]; then
+    printf "    ${G}✓${R} %-14s ${DIM}configured (hidden)${R}\n" "H1_API_TOKEN"
+  else
+    printf "    ${Y}⚠${R} %-14s ${DIM}not set in environment${R}\n" "H1_API_TOKEN"
+  fi
+
+  echo ""
+  read -r -p "  Press Enter to return..."
+}
+
+# =============================================================================
+# Recon Diff Engine
+# =============================================================================
+target_diff() {
+  local target="$1"
+  local sfile="$WS/$target/scope.yaml"
+  local afile="$WS/recon/data/$target/assets.json"
+
+  if [ ! -f "$sfile" ]; then
+    echo "  ${RED}scope.yaml nahi mila: $sfile${R}"
+    read -r -p "  Press Enter..."
+    return
+  fi
+
+  echo ""
+  title_box " RECON DIFF ENGINE: $target "
+  echo ""
+  echo "  ${DIM}Extracting in-scope roots from scope.yaml...${R}"
+
+  local roots
+  roots=$(python3 -c "import yaml; s = yaml.safe_load(open('$sfile')); print('\n'.join(s.get('roots', [])))" 2>/dev/null)
+
+  if [ -z "$roots" ]; then
+    echo "  ${Y}Roots khali hain scope.yaml me.${R}"
+    read -r -p "  Press Enter..."
+    return
+  fi
+
+  echo "  Roots: $(echo "$roots" | tr '\n' ' ')"
+  echo ""
+  echo "  ${Y}◌${R} Running fast passive subdomain discovery..."
+
+  local raw_dir="$WS/recon/data/$target/raw"
+  mkdir -p "$raw_dir"
+  local tmp_current="$raw_dir/diff_current.txt"
+  rm -f "$tmp_current"
+  while IFS= read -r r; do
+    [ -n "$r" ] && subfinder -d "$r" -silent 2>/dev/null >> "$tmp_current"
+  done <<< "$roots"
+
+  if [ ! -f "$tmp_current" ] || [ ! -s "$tmp_current" ]; then
+    echo "  ${Y}Koi subdomain return nahi hua.${R}"
+    read -r -p "  Press Enter..."
+    return
+  fi
+
+  sort -u -o "$tmp_current" "$tmp_current"
+  local total_now
+  total_now=$(wc -l < "$tmp_current")
+  echo "  ${G}✓${R} Live subdomains found now: ${B}$total_now${R}"
+
+  local tmp_known="$raw_dir/diff_known.txt"
+  rm -f "$tmp_known"
+  if [ -f "$afile" ]; then
+    grep '"host":' "$afile" | sed -E 's/.*"host":\s*"([^"]+)".*/\1/' | sort -u > "$tmp_known"
+  fi
+
+  if [ -s "$tmp_known" ]; then
+    local new_subs
+    new_subs=$(comm -13 "$tmp_known" "$tmp_current")
+    if [ -n "$new_subs" ]; then
+      echo ""
+      echo "  ${G}${B}🚨 NAYE SUBDOMAINS MIL GAYE (New Attack Surface):${R}"
+      while IFS= read -r sub; do
+        printf "    ${G}+ %s${R}\n" "$sub"
+      done <<< "$new_subs"
+    else
+      echo "  ${DIM}Koi naya subdomain nahi mila (Attack surface unchanged).${R}"
+    fi
+  else
+    echo "  ${DIM}Pehle ka assets.json nahi mila (Pehli baar recon chalaayein).${R}"
+  fi
+
+  rm -f "$tmp_current" "$tmp_known"
+  echo ""
+  read -r -p "  Press Enter to return..."
+}
+
+# =============================================================================
+# Target Action Sub-Menu
+# =============================================================================
+target_menu() {
+  local target="$1"
+  while true; do
+    clear
+    title_box " MISSION CONTROL: $target "
+    echo ""
+    echo "  Target:  ${B}${C}$target${R}"
+    echo "  Status:  $(target_stats "$target")"
+    echo ""
+    sep
+    echo "  ${B}Target Actions:${R}"
+    opt "1" "Interactive Shell / Session" "Terminal hunting session"
+    opt "2" "Full Recon Pipeline"         "subfinder → httpx → gau → js_miner"
+    opt "3" "Deep JS Miner (Katana)"     "client-side routes & secret extraction"
+    opt "4" "Safe Vulnerability Scan"    "Nuclei rate-limited prober"
+    opt "5" "View Candidate Report"      "Top-40 scored findings queue"
+    opt "6" "Recon Diff Engine"          "Check for newly deployed subdomains"
+    opt "7" "View Scope & Notes"         "SCOPE.md & NOTES.md"
+    opt "0" "Back to Main Menu"          ""
+    echo ""
+    sep
+    read -r -p "  ${B}Action for [$target]${R} [0-7]: " act
+
+    case "$act" in
+      1)
+        cd "$WS/$target"
+        if check_opencode; then
+          echo ""
+          echo "  [1] OpenCode AI Session  [2] Interactive Bash Shell"
+          read -r -p "  Choice [1-2]: " sc
+          if [ "$sc" = "1" ]; then
+            exec "$OPCODE_BIN"
+          else
+            PS1="[bug-bounty:$target]\$ " bash --norc -i
+          fi
+        else
+          PS1="[bug-bounty:$target]\$ " bash --norc -i
+        fi
+        ;;
+      2)
+        echo ""
+        python3 "$WS/recon/recon_pipeline.py" --program "$target"
+        echo ""
+        read -r -p "  Recon complete. Press Enter to continue..."
+        ;;
+      3)
+        echo ""
+        echo "  [1] Dry-run safe check  [2] Live JS Crawl"
+        read -r -p "  Choice [1-2]: " jc
+        if [ "$jc" = "2" ]; then
+          python3 "$WS/recon/js_miner.py" --program "$target"
+        else
+          python3 "$WS/recon/js_miner.py" --program "$target" --dry-run
+        fi
+        echo ""
+        read -r -p "  JS Miner complete. Press Enter to continue..."
+        ;;
+      4)
+        echo ""
+        echo "  [1] Dry-run safe check  [2] Live Nuclei scan"
+        read -r -p "  Choice [1-2]: " nc
+        if [ "$nc" = "1" ]; then
+          python3 "$WS/recon/scanner.py" --program "$target" --dry-run
+        else
+          python3 "$WS/recon/scanner.py" --program "$target"
+        fi
+        echo ""
+        read -r -p "  Scan complete. Press Enter to continue..."
+        ;;
+      5)
+        echo ""
+        local rep="$WS/recon/data/$target/candidate_report.md"
+        if [ -f "$rep" ]; then
+          clear
+          cat "$rep"
+        else
+          echo "  ${Y}candidate_report.md nahi mila. Abhi intelligence run karein? [Y/n]${R}"
+          read -r -p "  Choice: " ir
+          if [[ ! "$ir" =~ ^[nN]$ ]]; then
+            python3 "$WS/recon/intelligence.py" --program "$target" --top 40
+            [ -f "$rep" ] && cat "$rep"
+          fi
+        fi
+        echo ""
+        read -r -p "  Press Enter to return..."
+        ;;
+      6)
+        target_diff "$target"
+        ;;
+      7)
+        clear
+        echo "=== $target/SCOPE.md ==="
+        [ -f "$WS/$target/SCOPE.md" ] && cat "$WS/$target/SCOPE.md"
+        echo ""
+        echo "=== $target/NOTES.md ==="
+        [ -f "$WS/$target/NOTES.md" ] && cat "$WS/$target/NOTES.md"
+        echo ""
+        read -r -p "  Press Enter to return..."
+        ;;
+      0)
+        return
+        ;;
+      *)
+        echo "  ${RED}Invalid choice.${R}"; sleep 1
+        ;;
+    esac
+  done
 }
 
 # =============================================================================
@@ -182,8 +417,7 @@ new_scan() {
      Har line me exactly ek ` | ` separator. Koi commentary, numbering, ya markdown nahi.
      Agar koi naya candidate nahi mila to `NONE` print karo.' 2>&1)"
 
-  # Parse: "handle | name" lines
-  local candidates=() detail line handle name
+  local candidates=() line handle name
   while IFS= read -r line; do
     if [[ "$line" =~ ^[[:space:]]*([a-zA-Z0-9._-]+)[[:space:]]*\|[[:space:]]*(.+)$ ]]; then
       handle="${BASH_REMATCH[1]}"; name="${BASH_REMATCH[2]}"
@@ -219,7 +453,6 @@ new_scan() {
     local prog_name="${cand#* | }"
     local fname dup
     fname="$(normalize_name "$handle")"
-    # Duplicate guard: fuzzy vs existing folders
     dup=""
     while IFS= read -r t; do
       [ "$(normalize_name "$t")" = "$fname" ] && dup="$t" && break
@@ -229,20 +462,14 @@ new_scan() {
       echo "  ${Y}⚠ '$fname' ka folder already hai ($dup).${R}"
       read -r -p "  Usi me open karun? [${G}y${R}/${DIM}N${R}]: " ans
       if [[ "$ans" =~ ^[yY]$ ]]; then
-        cd "$WS/$dup"
-        if check_opencode; then
-          if "$OPCODE_BIN" --continue 2>/dev/null; then : else exec "$OPCODE_BIN"; fi
-        fi
+        target_menu "$dup"
       fi
       return
     fi
     create_target_folder "$fname" "$prog_name"
     echo ""
     echo "  ${G}✓${R} ${B}Target folder banaya: ${C}$fname/${R}"
-    echo ""
-    echo "  ${DIM}Pehle SCOPE.md me roots/excluded verify karo,${R}"
-    echo "  ${DIM}phir session:${R}"
-    echo "    ${B}cd $WS/$fname && $OPCODE_BIN${R}"
+    target_menu "$fname"
   else
     echo "  ${Y}Cancelled.${R}"
   fi
@@ -250,77 +477,78 @@ new_scan() {
 }
 
 # =============================================================================
-# Flow 2 — Continue EXISTING target (session resume)
+# Splash Screen
 # =============================================================================
-continue_target() {
-  local targets=() t i=1 sel
-  while IFS= read -r t; do targets+=("$t"); done < <(existing_targets)
-  if [ "${#targets[@]}" -eq 0 ]; then
-    echo "  ${Y}Koi existing target nahi (scope.yaml wala folder). Pehle [1] New scan use karo.${R}"
-    return
-  fi
-
+splash() {
+  clear
   echo ""
-  title_box " EXISTING TARGETS — SELECT "
+  center_block "██████╗  ██████╗ 
+██╔══██╗██╔══██╗
+██████╔╝██████╔╝
+██╔══██╗██╔══██╗
+██████╔╝██████╔╝
+╚═════╝ ╚═════╝" "${C}"
   echo ""
-  for t in "${targets[@]}"; do
-    printf "  ${B}${C}%2d${R}   %s\n" "$i" "$t"
-    i=$((i+1))
-  done
-  printf "  ${D}%2s   %s${R}\n" "0" "Cancel"
+  center "${B}${C}BUG BOUNTY — MISSION CONTROL${R}"
   echo ""
-  read -r -p "  ${B}Select${R} [0-$((i-1))]: " sel
-
-  if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -lt "$i" ]; then
-    local pick="${targets[$((sel-1))]}"
-    echo ""
-    echo "  ${G}✓${R} ${B}Resume: ${C}$pick/${R}"
-    cd "$WS/$pick"
-    if check_opencode; then
-      if "$OPCODE_BIN" --continue 2>/dev/null; then
-        :
-      else
-        exec "$OPCODE_BIN"
-      fi
-    fi
-  else
-    echo "  ${Y}Cancelled.${R}"
+  center "${DIM}Workspace:${R}  $WS"
+  center "${DIM}Targets:${R}    $(existing_targets | grep -c .) active"
+  center "${DIM}Pipeline:${R}   recon → scanner → js_miner → intelligence"
+  echo ""
+  center "${LINE}──────────────────────────────────────────────${R}"
+  center "${DIM}Legal first: SIRF in-scope authorized targets.${R}"
+  echo ""
+  if [ "${BASH_LAUNCHER_SKIP_SPLASH:-0}" != "1" ]; then
+    center "Press Enter to enter Mission Control..."
+    read -r -s -n1
   fi
 }
 
 # =============================================================================
-# Main menu
+# Main Menu
 # =============================================================================
 main_menu() {
   while true; do
     clear
-    title_box " BUG BOUNTY — LAUNCHER "
+    title_box " BUG BOUNTY — MISSION CONTROL "
     echo ""
-    echo "  ${B}Select an action:${R}"
-    echo ""
-    opt "1" "Start NEW scan"       "agent discovers new HackerOne target"
-    opt "2" "Continue EXISTING"    "resume a hunt session"
-    opt "3" "Quit"                 ""
+    echo "  ${B}Main Actions:${R}"
+    opt "N" "Start NEW scan"       "discover new HackerOne target"
+    opt "D" "System Diagnostics"   "tools, APIs & environment audit"
+    opt "Q" "Quit"                 "exit mission control"
     echo ""
     sep
-    echo "  ${D}── existing targets ─────────────($(existing_targets | grep -c .))────────${R}"
-    local t n=0
+    echo "  ${D}── ACTIVE TARGETS ($(existing_targets | grep -c .)) ──────────────────────────────────────${R}"
+    local targets=() t n=0
     while IFS= read -r t; do
+      [ -z "$t" ] && continue
       n=$((n+1))
-      printf "     ${G}%2d${R}  %s\n" "$n" "$t"
+      targets+=("$t")
+      local stats
+      stats=$(target_stats "$t")
+      printf "   ${G}%2d${R}  ${B}%-12s${R} %s\n" "$n" "$t" "$stats"
     done < <(existing_targets)
-    [ "$n" -eq 0 ] && echo "     ${DIM}(koi nahi — pehle [1] se naya scan start karo)${R}"
+    [ "$n" -eq 0 ] && echo "     ${DIM}(koi target nahi — pehle [N] se naya scan start karein)${R}"
     echo ""
-    read -r -p "  ${B}Your choice${R} [1-3]: " choice
+    read -r -p "  ${B}Select Target [1-$n] or Action [N/D/Q]:${R} " choice
 
     case "$choice" in
-      1) new_scan ;;
-      2) continue_target ;;
-      3) echo "  Bye."; exit 0 ;;
-      *) echo "  ${RED}Invalid — 1, 2, ya 3.${R}"; sleep 1 ;;
+      [nN]*) new_scan ;;
+      [dD]*) diagnostics_check ;;
+      [qQ]*) echo "  Happy hunting. Bye!"; exit 0 ;;
+      *)
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ]; then
+          local picked="${targets[$((choice-1))]}"
+          target_menu "$picked"
+        else
+          echo "  ${RED}Invalid choice.${R}"; sleep 1
+        fi
+        ;;
     esac
   done
 }
 
-splash
-main_menu
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  splash
+  main_menu
+fi
