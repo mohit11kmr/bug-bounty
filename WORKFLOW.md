@@ -117,6 +117,18 @@ ELIF full DAST coverage wanted    → ZAP baseline (docker, in-scope URL)
 ELSE manual per finding
 ```
 
+## 4.5 SECRETS — trufflehog (exposed credentials, cheap win)
+
+```bash
+trufflehog filesystem <target-dir> --only-verified --no-update
+# verified = key actually works (tool khud service ping karta hai) — fake/example keys ignore
+```
+
+- Sasta breadth: `.git`, JS bundles, configs, backups me hardcoded API keys/tokens/db creds.
+- `--only-verified` zyada signal: sirf **true-positive** keys report hon (KISS — verified hi count hoti).
+- Gitleaks alternative: `gitleaks git --remote <repo-url>` (open repos ke liye).
+- Hit mila → manual endpoint check + triage (expected: info-disclosure / cred exposure).
+
 ---
 
 ## 5. CANDIDATE QUEUE — intelligence.py (deterministic scoring, FREE breadth)
