@@ -31,7 +31,10 @@ RECON = BASE / "recon"
 EVIDENCE = BASE / "evidence" / "scans"
 
 DEFAULT_EXCLUDE_TAGS = "dos,fuzz,brute-force,crlf,injection,rce,kev"  # "safe scanning" first pass
+DEFAULT_INCLUDE_TAGS = "exposure,config,misconfig,tech,cve,default-login"  # high-value, low-noise
 NUCLEI_SEVERITY = "low,medium,high,critical"
+NUCLEI_MAX_TIME = 900  # 15 min cap — full coverage per host at safe RPS (0 = no cap)
+DEFAULT_RUN_ON = "live"  # "live" = 200/30x hosts only, "all" = har asset, "list:x,y" = explicit
 
 
 def load_scope(program: str) -> dict:
@@ -65,41 +68,69 @@ def scan_dir(program: str) -> Path:
     return d
 
 
-def run(cmd: list[str], dry: bool) -> None:
+def run(cmd: list[str], dry: bool, show_stats: bool = False) -> subprocess.CompletedProcess | None:
+    """Run command; prints tail of output. show_stats=True -> keep last ~4 stats lines."""
     print(f"[scanner] $ {' '.join(cmd)}")
     if dry:
-        return
+        return None
     r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
+    if r.returncode not in (0, 1):
         print(f"[scanner] ! exit={r.returncode}: {r.stderr[-400:]}")
-    elif r.stdout.strip():
-        print(r.stdout.strip()[-1000:])
+    out = r.stdout.strip()
+    if out:
+        tail = "\n".join(out.splitlines()[-12:]) if show_stats else out[-1000:]
+        print(tail[-1500:])
     return r
 
 
-def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool) -> Path | None:
-    """Scoped nuclei run. Targets file = in-scope hosts. Excludes destructive tags."""
+def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
+                run_on: str = "live") -> Path | None:
+    """Scoped nuclei run. Targets = in-scope hosts (default: verified live only).
+
+    Per-host sequential runs (har host ko apna max-time/coverage), merged jsonl —
+    batching ki wajah se max-time per-scan early-expire na ho.
+    """
     rpm, concurrency = rate_limits(scope)
+    if run_on == "live":
+        d = scan_dir(program)
+        probe = d / f"httpx_probe_{program}.txt"
+        run(["httpx", "-l", str(d / f"targets_{program}.txt"), "-silent", "-mc", "200,201,202,203,204,301,302,303,307,308",
+             "-o", str(probe)], dry)
+        if probe.exists() and not dry:
+            live = probe.read_text().splitlines()
+            print(f"[scanner] live hosts: {len(live)} {live}")
+            targets = live or targets  # fallback: koi live nahi to all targets
+    elif run_on.startswith("list:"):
+        targets = [t for t in run_on[5:].split(",") if t in targets]
+    print(f"[scanner] nuclei targets: {len(targets)}")
     d = scan_dir(program)
     stamp = date.today().isoformat()
-    targets_file = d / f"targets_{program}.txt"
-    targets_file.write_text("\n".join(targets) + "\n")
     out_jsonl = d / f"nuclei_{program}_{stamp}.jsonl"
     # remove old same-day output to avoid appends confusion
     if out_jsonl.exists():
         out_jsonl.unlink()
-    cmd = [
+    base = [
         "nuclei",
-        "-l", str(targets_file),
-        "-o", str(out_jsonl),
         "-jsonl",
         "-severity", NUCLEI_SEVERITY,
         "-exclude-tags", DEFAULT_EXCLUDE_TAGS,
+        "-tags", DEFAULT_INCLUDE_TAGS,
+        "-max-time", str(NUCLEI_MAX_TIME),
         "-rate-limit", str(max(1, rpm // 2)),   # safe: half the documented rpm
         "-c", str(concurrency),
-        "-nc", "-silent",
+        "-nc",
     ]
-    run(cmd, dry)
+    for t in targets:
+        # t = full URL ho sakta hai (httpx probe output se); sirf host extract karo
+        if "://" in t:
+            host = t.split("://", 1)[1].split("/", 1)[0]
+        else:
+            host = t
+        host_file = d / f"host_{host.replace('.', '_').replace(':', '_')}.txt"
+        host_file.write_text(host + "\n")
+        cmd = base + ["-l", str(host_file), "-o", str(out_jsonl)]
+        print(f"[scanner] nuclei host={host}")
+        run(cmd, dry, show_stats=True)
     if not dry and out_jsonl.exists():
         n = len(out_jsonl.read_text().splitlines())
         print(f"[scanner] nuclei findings: {n} -> {out_jsonl.relative_to(BASE)}")
@@ -170,8 +201,10 @@ def ffuf_check(program: str, scope: dict, host: str, wordlist: str, dry: bool) -
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--program", default="meesho")
+    ap.add_argument("--program", required=True, help="program folder name (e.g. meesho, kayak, general)")
     ap.add_argument("--dry-run", action="store_true", help="commands dikhao, chalao nahi")
+    ap.add_argument("--run-on", default=DEFAULT_RUN_ON,
+                    help="live|all|list:h1,h2 — nuclei targets kya ho")
     ap.add_argument("--no-nuclei", action="store_true")
     ap.add_argument("--ffuf-host")
     ap.add_argument("--ffuf-wordlist")
@@ -182,7 +215,7 @@ def main() -> None:
     print(f"[scanner] program={args.program} in-scope hosts={len(targets)}")
 
     if not args.no_nuclei:
-        out = nuclei_scan(args.program, scope, targets, args.dry_run)
+        out = nuclei_scan(args.program, scope, targets, args.dry_run, args.run_on)
         if out and not args.dry_run:
             import_nuclei_findings(out, args.program)
 
