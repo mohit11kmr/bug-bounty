@@ -10,6 +10,12 @@ PREFERRED INPUT: `recon/data/<program>/candidate_report.md` (intelligence.py ka 
 shortlist — deterministic, free). On ye top ~40 already scored surfaces hote hain; tum
 unme prior + evidence ka deep-ranking + TEST PLAN do.
 
+SECONDARY INPUT (free understanding layer): `recon/data/<program>/application_model.json` —
+app ki actors/objects/actions map. Ye URL list nahi, app structure deta hai. Isse
+hypothesis-engine ki strength milti hai: tum endpoint ko baaki app ke context me score karte
+ho, sirf URL-string ke hisaab se nahi. IF file exists → use it. ELIF nahi → app-model
+section skip karo, sirf URL-based prior se kaam chalao (kabhi fabricate mat karo).
+
 Secondary input (sirf when needed): raw artifacts (`gau.txt`, `httpx.jsonl`, etc.) —
 sirf un ENDPOINTS ka evidence dekho jo candidate_report me hain; poora raw dump mat
 re-score karo (token burn bina signal).
@@ -62,6 +68,20 @@ Evidence weights (apply per line you actually read):
 - Strict validation / CSRF token / WAF present → −15
 - Static asset (js/css/img) with tracking param → −40
 
+## Application-model priors (IF application_model.json exists — plus the above)
+
+Assign actor/object ownership before scoring:
+- IF endpoint scoped to given actor (path has supplier/admin/panel) AND object is
+  cross-tenant (order/supplier_id/org) → +20 BOLA/IDOR prior, high severity.
+- IF sensitive action on an object without ownership signal (delete/export on `/api/orders/`)
+  and actor = supplier/consumer → +15 (lateral access priors).
+- IF object supports workflow transitions (order→refund, invoice→payment) and a transition
+  endpoint is discoverable → +15 (logical-flow bug prior).
+- IF auth_surface (admin/panel/dashboard) reachable over http:// (not https) → +10.
+- IF only referral/utm/redirect-class params present and NO ID/object params in the whole
+  app → state that explicitly: "IDOR surface not visible in archived URLs — manual JS-mining
+  needed"; don't invent numeric-id priors where no id param exists.
+
 ## If/else routing rules (mirror the bug-bounty TOOLS.md decision tree)
 
 - IF input file is tech-detect output with old tech → cite the known CVE surface BEFORE scoring.
@@ -83,6 +103,12 @@ Evidence weights (apply per line you actually read):
 
 1. **PRIOR TABLE** — one line per candidate: `endpoint | param | prior | evidence from <file> | posterior % | verdict`
 2. **RANKED HITS** — sorted by posterior %, top first.
-3. **TEST PLAN** — top 3-5, each with the exact READ-ONLY manual test to run (what to send,
+3. **HYPOTHESIS ENGINE** — top 3-5 **specific vulnerability guesses**, not URL picks. Each in one line:
+   `COUNT > ACTOR accessing OBJECT of ANOTHER ACTOR via <param>?`
+   Example: `BOLA > supplier B sees supplier A's order via /api/orders/{id}?` or
+   `OWNERSHIP > consumer changes order_created→refunded state transition without role?`
+   Tie each to (a) application_model actor/object, (b) the candidate_report line that
+   justifies it, (c) why it's plausible — the implied test target is then obvious to the human.
+4. **TEST PLAN** — top 3-5, each with the exact READ-ONLY manual test to run (what to send,
    what response sign to look for). No active probing from you.
 4. **ASSUMPTIONS & GAPS** — named priors; recon files that were missing.

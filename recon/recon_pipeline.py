@@ -217,6 +217,11 @@ def main() -> None:
         endpoints = collect_endpoints(scope, raw)
         write_json(data_dir / "endpoints.json", endpoints)
 
+    if (data_dir / "endpoints.json").exists():
+        log("=== Phase 1c: Application model ===")
+        subprocess.run([sys.executable, "recon/application_model.py", "--program", args.program],
+                       check=False)
+
     meta = {
         "program": args.program,
         "run_at": datetime.now().isoformat(timespec="seconds"),

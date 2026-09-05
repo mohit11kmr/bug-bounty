@@ -144,6 +144,31 @@ hai jo prob-hunter (next) ka input hai.
 
 ---
 
+## 5.5 APPLICATION MODEL — app ko URL list nahi, app samajho (deterministic, FREE)
+
+```bash
+python3 recon/application_model.py --program <program>
+# → recon/data/<program>/application_model.json
+```
+
+URL paths se deterministic heuristics (no LLM) extract karta hai: **actors** (supplier/admin/
+consumer/affiliate), **objects** (order/catalog/invoice/file/payment/fulfillment), **actions**
+(create/update/delete/export/refund/upload), **sensitive params** (`?id=` / `?order_id=` /
+`?redirect=`) aur **auth-surfaces** (admin/panel/dashboard paths).
+
+> Kehna kya: intelligence kahta hai "kaunse URL 40 me hain" (breadth). Application model
+> kahta hai "**app me kya kya hai, kaun access kar sakta hai**" (understanding). Ye hi missing
+> layer hai — "interesting URLs" se "interesting vulnerability guesses" tak ka pul.
+
+Human refinement (optional but full value yahi se):
+```
+application_model.json me ownership_graph + workflow_states bharo
+  ownership_graph: [{"actor": "supplier", "object": "order"}]
+  workflow_states: [["order_created", "order_refunded"]]   # transition test-able
+```
+
+---
+
 ## 6. PROBABILISTIC RANKING — prob-hunter (LLM depth-rank, sirf shortlist par)
 
 > Deterministic breadth (intelligence.py, free) ke BAAD hi call — kabhi raw gau par nahi.
