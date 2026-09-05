@@ -12,6 +12,7 @@ Output (per program, recon/data/<program>/):
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from datetime import date, datetime
@@ -21,7 +22,23 @@ BASE = Path(__file__).resolve().parent.parent  # bug-bounty/
 RECON = BASE / "recon"
 RATE_LIMIT = {"concurrency": 5, "delay": "800ms"}  # WAF-safe default, scope.yaml override
 
-TOOLS = ["subfinder", "dnsx", "httpx", "katana", "gau", "waybackurls"]
+TOOLS = ["subfinder", "dnsx", "httpx", "gau"]
+
+
+def tool_version(t: str) -> str:
+    """Best-effort version scrape: stderr/stdout, flag fallback. Faisla nahi rukega."""
+    for flag in ("-version", "--version", "-v"):
+        try:
+            r = subprocess.run([t, flag], capture_output=True, text=True, timeout=5)
+            out = (r.stdout + r.stderr).strip()
+            for line in out.splitlines():
+                if "unknown" in line.lower() or "flag" in line.lower():
+                    continue
+                if re.search(r"\d+\.\d+", line):
+                    return line.strip()[:60]
+        except (subprocess.SubprocessError, OSError):
+            continue
+    return ""
 
 
 def log(msg: str) -> None:
@@ -203,8 +220,7 @@ def main() -> None:
     meta = {
         "program": args.program,
         "run_at": datetime.now().isoformat(timespec="seconds"),
-        "tools": {t: subprocess.run([t, "-version"], capture_output=True, text=True).stdout.strip()
-                  for t in TOOLS},
+        "tools": {t: tool_version(t) for t in TOOLS},
         "rate_limits": RATE_LIMIT,
         "asset_count": len(assets),
     }

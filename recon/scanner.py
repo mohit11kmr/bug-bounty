@@ -93,8 +93,12 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
     rpm, concurrency = rate_limits(scope)
     if run_on == "live":
         d = scan_dir(program)
+        tgt_file = d / f"targets_{program}.txt"
+        # produce live-probe input ourselves (scope roots union). Pehle stale content hatao.
+        probe_in = "\n".join(sorted(set(targets))) + "\n"
+        tgt_file.write_text(probe_in)
         probe = d / f"httpx_probe_{program}.txt"
-        run(["httpx", "-l", str(d / f"targets_{program}.txt"), "-silent", "-mc", "200,201,202,203,204,301,302,303,307,308",
+        run(["httpx", "-l", str(tgt_file), "-silent", "-mc", "200,201,202,203,204,301,302,303,307,308",
              "-o", str(probe)], dry)
         if probe.exists() and not dry:
             live = probe.read_text().splitlines()
@@ -139,15 +143,26 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
 
 
 def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
-    """Parse nuclei JSONL -> update candidate_findings (notes + confidence), no new assets."""
+    """Parse nuclei JSONL -> update candidate_findings (notes + confidence), no new assets.
+    Tag map from nuclei info.tags -> our candidate tag; score derives from severity."""
     db = RECON / "data" / program / "recon.db"
     con = sqlite3.connect(db)
     cur = con.cursor()
+    # table create kar do agar intelligence se pehle chala to (pipeline order-independent)
+    cur.execute("""CREATE TABLE IF NOT EXISTS candidate_findings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT, host TEXT, method TEXT,
+        tag TEXT, score INTEGER, status TEXT DEFAULT 'triage',
+        confidence REAL DEFAULT 0.0,
+        notes TEXT DEFAULT '',
+        created_at TEXT, updated_at TEXT,
+        UNIQUE(url, tag));""")
     tag_map = {
         "cve": "vuln_cve", "misconfiguration": "vuln_misconfig",
         "exposure": "vuln_exposure", "tech": "tech_probe",
         "default-login": "vuln_default_login", "vulnerability": "vuln",
     }
+    sev_score = {"critical": 100, "high": 90, "medium": 70, "low": 50, "info": 40}
     inserted = 0
     for line in out_jsonl.read_text().splitlines():
         try:
@@ -155,21 +170,23 @@ def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
         except json.JSONDecodeError:
             continue
         url = rec.get("url", "")
-        tag_bucket = rec.get("template-id", "").split("/")[-1].split(".")[0]
-        # nuclei "info" se template title
+        host = rec.get("host", "")
         info = rec.get("info", {})
-        title = info.get("name", tag_bucket)
-        sev = info.get("severity", "info")
+        title = info.get("name", "") or ""
+        sev = info.get("severity", "").lower()
+        tags = (info.get("tags") or [])
+        tag = next((t for k, t in tag_map.items() if k in tags), "vuln")
+        score = sev_score.get(sev, 50)
+        notes = f"nuclei: {title} ({sev})"
+        conf = {"critical": 0.9, "high": 0.8, "medium": 0.65, "low": 0.5}.get(sev, 0.4)
         cur.execute(
-            "INSERT OR IGNORE INTO candidate_findings (url,host,method,tag,score,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            (url, "", "GET", "vuln_nuclei", 90, "triage", date.today().isoformat(),
-             date.today().isoformat()))
-        cur.execute(
-            "UPDATE candidate_findings SET confidence = MAX(confidence, 0.6), "
-            "notes = CASE WHEN notes='' THEN ? ELSE notes || ' | ' || ? END "
-            "WHERE url = ? AND tag = 'vuln_nuclei'",
-            (f"nuclei: {title} ({sev})", f"nuclei: {title} ({sev})", url))
+            "INSERT INTO candidate_findings (url,host,method,tag,score,status,confidence,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,'triage',?,?,?) "
+            "ON CONFLICT(url, tag) DO UPDATE SET "
+            "score=MAX(score, excluded.score), confidence=MAX(confidence, excluded.confidence), "
+            "notes=CASE WHEN notes='' THEN ? ELSE notes || ' | ' || ? END, updated_at=excluded.updated_at",
+            (url, host, "GET", tag, score, conf, date.today().isoformat(),
+             date.today().isoformat(), notes, notes))
         inserted += 1
     con.commit()
     con.close()
