@@ -33,14 +33,14 @@ second opinion → report. SIRF in-scope. Koi out-of-scope/unauthorized testing 
 | File/Path | Role |
 |-----------|------|
 | `start-bugbounty.sh` | Launcher (new-scan / continue-existing) |
-| `opencode.json` | Config: default agent + prob-hunter subagent + skills + hackerone MCP |
+| `opencode.json` | Config: default agent + skills + hackerone MCP (global) |
 | `AGENTS.md` / `HUNTING_GUIDE.md` | Structure rules + learning path |
 | `WORKFLOW.md` | Operational flow (entry → report) |
 | `IF_ELSE.md` | if/else decision tree (tool/skill routing, single source) |
 | `recon/recon_pipeline.py` | Recon → `recon/data/<p>/` assets/endpoints JSON |
 | `recon/scanner.py` | Safe scope-aware nuclei/ffuf → recon.db |
 | `recon/intelligence.py` | Deterministic candidate scoring → candidate_report.md (free breadth) |
-| `prompts/prob_hunter_prompt.txt` | prob-hunter Bayesian depth-rank system prompt |
+| `prompts/prob_hunter_prompt.txt` | prob-hunter Bayesian depth-rank prompt (source of truth — registered agent `~/.config/opencode/agents/prob-hunter.md` reads this via `@prob-hunter`) |
 | `.opencode/skills/{triage,grilling,grill-me,handoff}` | Finding state-machine, interrogation, session handoff |
 | `<program>/scope.yaml` + SCOPE.md + NOTES.md | Per-target scope + progress |
 | `evidence/` | Handoffs, screenshots, scan outputs |

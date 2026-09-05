@@ -25,7 +25,7 @@ bug-bounty/                         ← WORKSPACE (project)
 └── reports/ + evidence/            ← kya submit kiya / PoC
 ```
 
-> Phase order: recon_pipeline (1) → scanner (2) → intelligence (3) → prob-hunter (4, LLM depth-rank) → manual (5).
+> Phase order: recon_pipeline (1) → scanner (2) → intelligence (3) → application_model (4, free) → prob-hunter (5, LLM depth-rank) → manual (6).
 
 ---
 
@@ -169,24 +169,28 @@ application_model.json me ownership_graph + workflow_states bharo
 
 ---
 
-## 6. PROBABILISTIC RANKING — prob-hunter (LLM depth-rank, sirf shortlist par)
+## 6. PROBABILISTIC RANKING — prob-hunter (registered agent, LLM depth-rank, sirf shortlist par)
 
 > Deterministic breadth (intelligence.py, free) ke BAAD hi call — kabhi raw gau par nahi.
-> Ye "kya test karu" nahi, "**konsa pehle aur kyun**" decide karta hai + exact manual test.
+> Agent = `~/.config/opencode/agents/prob-hunter.md` (model `opencode/big-pickle`).
+> Ye "kya test karu" nahi, "**konsa pehle aur kyun**" decide karta hai + hypothesis + manual test.
 
 Trigger (if/else):
 ```text
-IF  candidate_report.md exists (intelligence.py chala)   → @prob-hunter candidate_report.md
-ELIF sirf raw recon files hain                          → pehle pipeline+intelligence, phir prob-hunter
-ELIF 1-2 suspicious endpoints only                      → skip prob-hunter, seedha manual
+IF  candidate_report.md + application_model.json dono exist   → @prob-hunter (dono inputs)
+ELIF candidate_report.md only (app model missing)             → @prob-hunter candidate_report.md
+ELIF sirf raw recon files hain                                → pehle pipeline+intelligence, phir prob-hunter
+ELIF 1-2 suspicious endpoints only                            → skip prob-hunter, seedha manual
 ```
 
-Input: **top-40 shortlist** `recon/data/<program>/candidate_report.md` (kabhi full gau/httpx
-nahi — LLM credits burn). Output:
+Input: **top-40 shortlist** `recon/data/<program>/candidate_report.md` + **app map**
+`recon/data/<program>/application_model.json` (kabhi full gau/httpx nahi — LLM credits
+burn). Output:
 1. PRIOR TABLE (endpoint | param | prior | evidence | posterior % | verdict)
 2. RANKED HITS (sorted)
-3. TEST PLAN (top 3-5, read-only manual steps)
-4. ASSUMPTIONS & GAPS
+3. HYPOTHESIS ENGINE (top 3-5 specific vuln guesses: actor→object→param)
+4. TEST PLAN (top 3-5, read-only manual steps)
+5. ASSUMPTIONS & GAPS
 
 Verdict bands: 0-9% SKIP · 10-24% LOW · 25-49% MEDIUM · 50-74% HIGH · 75%+ CRITICAL-HUNT.
 
