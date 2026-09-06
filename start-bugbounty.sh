@@ -1090,6 +1090,7 @@ main_menu() {
     echo "${P}  ${B}Mission Actions:${R}"
     opt "N" "⚡ Start NEW Scan"          "discover new HackerOne targets (Cash Bounty / All)"
     opt "M" "🔄 Continuous Recon Daemon" "background delta watcher & automated alerting"
+    opt "T" "📱 Telegram & Phone Alerts" "pair phone number & setup telegram notifications"
     opt "D" "🔍 System Diagnostics"      "tools, APIs, Docker & environment audit"
     opt "Q" "🚪 Quit"                    "exit mission control"
     echo ""
@@ -1110,11 +1111,12 @@ main_menu() {
     echo ""
     sep
     local choice
-    read -r -p "${P}  ${B}Select Target [1-$n] or Action [N/M/D/Q]:${R} " choice
+    read -r -p "${P}  ${B}Select Target [1-$n] or Action [N/M/T/D/Q]:${R} " choice
 
     case "$choice" in
       [nN]*) new_scan ;;
       [mM]*) daemon_menu ;;
+      [tT]*) python3 "$WS/recon/notify.py" --setup-telegram ;;
       [dD]*) diagnostics_check ;;
       [qQ]*) echo "${P}  Happy hunting. Bye!"; exit 0 ;;
       *)
