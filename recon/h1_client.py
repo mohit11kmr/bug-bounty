@@ -349,13 +349,39 @@ def setup_target(handle, folder_name=None, force=False):
         notes_md_path.write_text(notes_content, encoding="utf-8")
         print(f"[h1_client] Created {notes_md_path}")
 
-    # 4. Create opencode.json
+    # 4. Create opencode.json (dynamically scaffolded per program, no hardcoded meesho references)
     opencode_path = target_dir / "opencode.json"
-    if not opencode_path.exists():
-        parent_oc = BASE_DIR / "meesho" / "opencode.json"
-        if parent_oc.exists():
-            opencode_path.write_text(parent_oc.read_text(encoding="utf-8"), encoding="utf-8")
-            print(f"[h1_client] Created {opencode_path}")
+    if not opencode_path.exists() or force:
+        oc_config = {
+            "$schema": "https://opencode.ai/config.json",
+            "default_agent": "hackerone-analyst",
+            "instructions": ["SCOPE.md", "NOTES.md", "AUTONOMOUS_HUNT_PROMPT.md"],
+            "skills": {
+                "paths": [
+                    "/home/mohit/.config/opencode/skills/bug-bounty",
+                    "/home/mohit/.config/opencode/skills/research",
+                    "/home/mohit/.config/opencode/skills/secure-coding"
+                ]
+            },
+            "mcp": {
+                "hackerone": {
+                    "type": "local",
+                    "command": ["npx", "-y", "hackerone-mcp@latest"],
+                    "environment": {
+                        "H1_USERNAME": "{env:H1_USERNAME}",
+                        "H1_API_TOKEN": "{env:H1_API_TOKEN}"
+                    },
+                    "enabled": True
+                }
+            },
+            "permission": {
+                "*": "allow",
+                "bash": "allow",
+                "external_directory": "allow"
+            }
+        }
+        opencode_path.write_text(json.dumps(oc_config, indent=2) + "\n", encoding="utf-8")
+        print(f"[h1_client] Created {opencode_path}")
 
     return {
         "folder": folder_name,

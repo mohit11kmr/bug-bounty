@@ -88,8 +88,8 @@ def run(cmd: list, out: Path) -> None:
 
 def make_scope_filter(scope: dict):
     """Return fn(host) -> bool. In-scope = root match AND not excluded (wildcard aware)."""
-    roots = [str(r).lower() for r in scope["roots"]]
-    excluded = [str(x).lower() for x in scope.get("excluded", [])]
+    roots = [str(r).lower() for r in (scope.get("roots") or [])]
+    excluded = [str(x).lower() for x in (scope.get("excluded") or [])]
 
     def wildcard_match(host: str, patterns: list) -> bool:
         host = host.lower().rstrip(".")
@@ -119,7 +119,7 @@ def make_scope_filter(scope: dict):
 def collect_assets(scope: dict, raw: Path) -> list:
     """Asset[] — guide §8: host, ip, status, title, tech, source, first_seen, last_seen."""
     is_in_scope = make_scope_filter(scope)
-    roots = [str(r) for r in scope["roots"]]
+    roots = [str(r) for r in (scope.get("roots") or [])]
     subfinder_out = raw / "subfinder.txt"
     dnsx_out = raw / "dnsx.txt"
     httpx_out = raw / "httpx.jsonl"
@@ -161,10 +161,16 @@ def collect_assets(scope: dict, raw: Path) -> list:
         log(f"  ✓ DNS resolved: {res_count}/{len(hosts)} hosts responding")
 
     # 3) HTTP probe + tech detect
+    resolved_hosts = []
+    if dnsx_out.exists():
+        dns_lines = [l.strip().lower() for l in dnsx_out.read_text().splitlines() if l.strip()]
+        resolved_hosts = sorted({h for h in dns_lines if is_in_scope(h)})
+
+    probe_hosts = resolved_hosts if resolved_hosts else hosts
     probe_in = raw / "probe-in.txt"
     with open(probe_in, "w") as f:
-        f.write("\n".join(hosts))
-    log(f"⚡ [3/3] Probing HTTP services, status & tech across {len(hosts)} hosts with httpx...")
+        f.write("\n".join(probe_hosts))
+    log(f"⚡ [3/3] Probing HTTP services, status & tech across {len(probe_hosts)} hosts with httpx...")
     
     cmd = ["httpx", "-l", str(probe_in), "-silent",
            "-json", "-tech-detect", "-status-code", "-title",
@@ -221,7 +227,7 @@ def collect_endpoints(scope: dict, raw: Path) -> list:
     is_in_scope = make_scope_filter(scope)
     gau_out = raw / "gau.txt"
     if not gau_out.exists() or gau_out.stat().st_size == 0:
-        roots_clean = [str(r).lstrip("*.").strip() for r in scope["roots"]]
+        roots_clean = [str(r).lstrip("*.").strip() for r in (scope.get("roots") or [])]
         log(f"📜 Querying Wayback Machine, AlienVault & URLScan across {len(roots_clean)} roots...")
         all_urls = set()
         for idx, r in enumerate(roots_clean, 1):
@@ -264,12 +270,31 @@ def write_json(path: Path, data) -> None:
     log(f"  wrote {path.name} ({len(data)} records)")
 
 
+def _selfcheck() -> None:
+    print("[recon_pipeline] Running selfcheck...")
+    scope = {
+        "roots": ["example.com", "*.target.com"],
+        "excluded": ["excluded.target.com"]
+    }
+    is_in_scope = make_scope_filter(scope)
+    assert is_in_scope("example.com") is True
+    assert is_in_scope("api.target.com") is True
+    assert is_in_scope("excluded.target.com") is False
+    assert is_in_scope("out-of-scope.com") is False
+    print("[recon_pipeline] selfcheck OK: Scope filter and data contracts verified.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--program", default="meesho", help="program folder name")
     ap.add_argument("--skip-endpoints", action="store_true", help="gau skip (slow)")
     ap.add_argument("--skip-js", action="store_true", help="skip katana JS crawl & mining")
+    ap.add_argument("--selfcheck", action="store_true", help="run internal selfcheck")
     args = ap.parse_args()
+
+    if args.selfcheck:
+        _selfcheck()
+        return
 
     check_tools(skip_endpoints=args.skip_endpoints)
     program_dir = BASE / args.program
@@ -279,7 +304,9 @@ def main() -> None:
     raw = data_dir / "raw"
     raw.mkdir(parents=True, exist_ok=True)
 
-    log(f"program={args.program} | roots={len(scope['roots'])} | excluded={len(scope['excluded'])}")
+    roots = scope.get("roots") or []
+    excluded = scope.get("excluded") or []
+    log(f"program={args.program} | roots={len(roots)} | excluded={len(excluded)}")
     log("=== Phase 1: Asset discovery ===")
     assets = collect_assets(scope, raw)
     write_json(data_dir / "assets.json", assets)

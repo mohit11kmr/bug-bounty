@@ -12,7 +12,10 @@ set -uo pipefail
 export PYTHONUNBUFFERED=1
 WS="$HOME/Desktop/projects/bug-bounty"
 
-# ---- Load HackerOne Credentials (.env.h1) ----
+# ---- Load HackerOne Credentials (.env.h1) & Enforce Permissions ----
+[ -f "$WS/.env.h1" ] && chmod 600 "$WS/.env.h1" 2>/dev/null || true
+[ -f "$WS/.env.notify" ] && chmod 600 "$WS/.env.notify" 2>/dev/null || true
+
 if [ -z "${H1_USERNAME:-}" ] || [ -z "${H1_API_TOKEN:-}" ]; then
   if [ -f "$WS/.env.h1" ]; then
     # shellcheck disable=SC1091
@@ -391,8 +394,33 @@ target_diff() {
   read -r -p "${P}  Press Enter or [0] to return... " _
 }
 
+# Helper: Run a named pipeline phase, report duration, and trap exit codes
+run_phase() {
+  local phase_num="$1"
+  local total_phases="$2"
+  local phase_name="$3"
+  shift 3
+  local cmd=("$@")
+
+  echo "${P}  ${B}${BLUE}◈ [Phase ${phase_num}/${total_phases}]${R} ⚡ ${B}${phase_name}...${R}"
+  local t_start=$(date +%s)
+
+  "${cmd[@]}"
+  local exit_code=$?
+  local t_dur=$(( $(date +%s) - t_start ))
+
+  if [ $exit_code -ne 0 ]; then
+    echo "${P}    ${RED}✗ Phase ${phase_num} failed with exit code ${exit_code} (${t_dur}s)${R}"
+    return $exit_code
+  fi
+
+  echo "${P}    ${GREEN}✓ Phase ${phase_num} complete in ${t_dur}s.${R}"
+  echo ""
+  return 0
+}
+
 # =============================================================================
-# COMPLETE AUTONOMOUS SCAN & HUNT PIPELINE (Recon → JS → Triage → AI Agent)
+# COMPLETE AUTONOMOUS SCAN & HUNT PIPELINE (Recon → JS → Scan → Triage → AI Agent)
 # =============================================================================
 run_complete_hunt() {
   local target="$1"
@@ -404,44 +432,35 @@ run_complete_hunt() {
   echo ""
   sep
 
-  # Step 1: Recon Pipeline (Subdomains + HTTP probing + Archive URLs)
-  local t1_start=$(date +%s)
-  echo "${P}  ${B}${BLUE}◈ [Phase 1/4]${R} ⚡ ${B}Subdomain Enumeration & Alive Probing (httpx)...${R}"
-  python3 "$WS/recon/recon_pipeline.py" --program "$target"
-  local t1_dur=$(( $(date +%s) - t1_start ))
-  echo "${P}    ${GREEN}✓ Phase 1 complete in ${t1_dur}s.${R}"
-  echo ""
+  # Phase 1: Recon Pipeline (Subdomains + HTTP probing + Archive URLs, skip duplicate JS)
+  run_phase 1 5 "Subdomain Enumeration & Alive Probing (httpx)" \
+    python3 "$WS/recon/recon_pipeline.py" --program "$target" --skip-js || return 1
 
-  # Step 2: Deep JS Miner & Secret Extraction
-  local t2_start=$(date +%s)
-  echo "${P}  ${B}${BLUE}◈ [Phase 2/4]${R} ⚡ ${B}Deep JS-Mining & Client-side Route Extraction (Katana)...${R}"
-  python3 "$WS/recon/js_miner.py" --program "$target"
-  local t2_dur=$(( $(date +%s) - t2_start ))
-  echo "${P}    ${GREEN}✓ Phase 2 complete in ${t2_dur}s.${R}"
-  echo ""
+  # Phase 2: Client-side JS Miner & Route Extraction (Katana)
+  run_phase 2 5 "Client-side Route & Secret Extraction (Katana)" \
+    python3 "$WS/recon/js_miner.py" --program "$target" || return 1
 
-  # Step 3: Intelligence Triage & Ranking
-  local t3_start=$(date +%s)
-  echo "${P}  ${B}${BLUE}◈ [Phase 3/4]${R} ⚡ ${B}Intelligence Triage & Scoring (candidate_findings)...${R}"
-  python3 "$WS/recon/intelligence.py" --program "$target" --top 40
-  local t3_dur=$(( $(date +%s) - t3_start ))
-  echo "${P}    ${GREEN}✓ Phase 3 complete in ${t3_dur}s.${R}"
-  echo ""
+  # Phase 3: Safe Vulnerability & Misconfiguration Scanning (Nuclei)
+  run_phase 3 5 "Safe Vulnerability Scanning (Nuclei)" \
+    python3 "$WS/recon/scanner.py" --program "$target" || return 1
 
-  # Step 4: Autonomous Hunt Prompt Generation
-  local t4_start=$(date +%s)
-  echo "${P}  ${B}${BLUE}◈ [Phase 4/4]${R} ⚡ ${B}Generating Pre-Filled Autonomous Hunting Prompt...${R}"
+  # Phase 4: Intelligence Triage & Ranking
+  run_phase 4 5 "Intelligence Triage & Scoring (candidate_findings)" \
+    python3 "$WS/recon/intelligence.py" --program "$target" --top 40 || return 1
+
+  # Phase 5: Autonomous Hunt Prompt Generation
   local prompt_file="$WS/$target/AUTONOMOUS_HUNT_PROMPT.md"
-  python3 "$WS/recon/h1_client.py" --prompt "$target"
-  local t4_dur=$(( $(date +%s) - t4_start ))
+  run_phase 5 5 "Generating Pre-Filled Autonomous Hunting Prompt" \
+    python3 "$WS/recon/h1_client.py" --prompt "$target" || return 1
+
   if [ -f "$prompt_file" ]; then
-    echo "${P}    ${GREEN}✓${R} Pre-filled hunting prompt generated in ${t4_dur}s: ${B}${CYAN}$prompt_file${R}"
+    echo "${P}    ${GREEN}✓${R} Pre-filled hunting prompt ready: ${B}${CYAN}$prompt_file${R}"
   fi
   echo ""
   sep
   echo ""
 
-  # Step 5: Launch OpenCode or Interactive Shell
+  # Step 6: Launch OpenCode or Interactive Shell
   echo "${P}  ${B}${GOLD}🚀 READY TO HUNT:${R} Target surface analyzed aur AI Agent prompt tayyar hai!"
   echo ""
   echo "${P}  ${MUTED}Candidate findings, in-scope roots, aur rules prompt me pre-configured hain.${R}"
@@ -463,7 +482,12 @@ run_complete_hunt() {
         echo "${P}  ${GREEN}✓${R} Launching OpenCode in $target/..."
         echo "${P}  ${MUTED}(AUTONOMOUS_HUNT_PROMPT.md loaded — press Submit to hunt)${R}"
         sleep 1
-        exec "$OPCODE_BIN"
+        if [ -f "$prompt_file" ]; then
+          "$OPCODE_BIN" "$WS/$target" --prompt "$(cat "$prompt_file")"
+        else
+          "$OPCODE_BIN" "$WS/$target"
+        fi
+        cd "$WS"
       else
         echo ""
         echo "${P}  ${ORANGE}⚠ OpenCode binary PATH me nahi mila.${R}"
@@ -478,6 +502,7 @@ run_complete_hunt() {
           echo "${P}  ${MUTED}(Prompt \$HUNT_PROMPT env variable me bhi loaded hai)${R}"
           PS1="[hunt:$target]\$ " bash --norc -i
         fi
+        cd "$WS"
       fi
       ;;
     2)
@@ -496,6 +521,7 @@ run_complete_hunt() {
       echo "${P}  ${GREEN}✓${R} Dropped into hunting shell for target: ${B}$target${R}"
       echo "${P}  ${MUTED}Prompt file: $prompt_file | Env: \$HUNT_PROMPT${R}"
       PS1="[hunt:$target]\$ " bash --norc -i
+      cd "$WS"
       ;;
     0|[bB]*|[qQ]*)
       return
@@ -508,7 +534,7 @@ run_complete_hunt() {
 
 # =============================================================================
 # ZERO-TOUCH AUTONOMOUS HUNT & AUTO-REPORT PIPELINE
-# Recon → JS Miner → Intelligence → Auto-Hunter → Report Gen → Push Notification
+# Recon → JS Miner → Scanner → Intelligence → Auto-Hunter → Report Gen → Push Alert
 # =============================================================================
 run_zero_touch_hunt() {
   local target="$1"
@@ -516,44 +542,32 @@ run_zero_touch_hunt() {
   title_box " 🤖 AUTONOMOUS ZERO-TOUCH HUNT " "$target"
   echo ""
   echo "${P}  ${B}Target:${R} ${CYAN}${B}$target${R}"
-  echo "${P}  ${MUTED}Initiating 100% automated reconnaissance, candidate verification & report generation...${R}"
+  echo "${P}  ${MUTED}Initiating 100% automated reconnaissance, scanning, verification & report generation...${R}"
   echo ""
   sep
 
-  # Phase 1: Recon Pipeline
-  local t1_start=$(date +%s)
-  echo "${P}  ${B}${BLUE}◈ [Phase 1/5]${R} ⚡ ${B}Reconnaissance & Asset Probing...${R}"
-  python3 "$WS/recon/recon_pipeline.py" --program "$target"
-  local t1_dur=$(( $(date +%s) - t1_start ))
-  echo "${P}    ${GREEN}✓ Recon complete in ${t1_dur}s.${R}"
-  echo ""
+  # Phase 1: Recon Pipeline (Subdomains + Alive Probing, skip duplicate JS)
+  run_phase 1 6 "Reconnaissance & Asset Probing" \
+    python3 "$WS/recon/recon_pipeline.py" --program "$target" --skip-js || return 1
 
-  # Phase 2: Deep JS Miner & Secret Extraction
-  local t2_start=$(date +%s)
-  echo "${P}  ${B}${BLUE}◈ [Phase 2/5]${R} ⚡ ${B}Client-side JS-Mining & Route Extraction...${R}"
-  python3 "$WS/recon/js_miner.py" --program "$target"
-  local t2_dur=$(( $(date +%s) - t2_start ))
-  echo "${P}    ${GREEN}✓ JS Miner complete in ${t2_dur}s.${R}"
-  echo ""
+  # Phase 2: Client-side JS Miner
+  run_phase 2 6 "Client-side Route & Secret Extraction" \
+    python3 "$WS/recon/js_miner.py" --program "$target" || return 1
 
-  # Phase 3: Intelligence Triage & Scoring
-  local t3_start=$(date +%s)
-  echo "${P}  ${B}${BLUE}◈ [Phase 3/5]${R} ⚡ ${B}Prioritization & Heuristic Scoring...${R}"
-  python3 "$WS/recon/intelligence.py" --program "$target" --top 40
-  local t3_dur=$(( $(date +%s) - t3_start ))
-  echo "${P}    ${GREEN}✓ Intelligence triage complete in ${t3_dur}s.${R}"
-  echo ""
+  # Phase 3: Safe Vulnerability Scanning (Nuclei)
+  run_phase 3 6 "Safe Vulnerability Scanning (Nuclei)" \
+    python3 "$WS/recon/scanner.py" --program "$target" || return 1
 
-  # Phase 4: Headless Candidate Prober & Verification
-  local t4_start=$(date +%s)
-  echo "${P}  ${B}${BLUE}◈ [Phase 4/5]${R} ⚡ ${B}Headless Candidate Verification (CORS/Auth/Leaks)...${R}"
-  python3 "$WS/recon/auto_hunter.py" --program "$target" --min-score 50
-  local t4_dur=$(( $(date +%s) - t4_start ))
-  echo "${P}    ${GREEN}✓ Candidate verification complete in ${t4_dur}s.${R}"
-  echo ""
+  # Phase 4: Intelligence Triage & Scoring
+  run_phase 4 6 "Intelligence Prioritization & Heuristic Scoring" \
+    python3 "$WS/recon/intelligence.py" --program "$target" --top 40 || return 1
 
-  # Phase 5: Check Reports & Dispatch Notifications
-  echo "${P}  ${B}${BLUE}◈ [Phase 5/5]${R} ⚡ ${B}Report Compilation & Alert Dispatch...${R}"
+  # Phase 5: Headless Candidate Verification
+  run_phase 5 6 "Headless Candidate Verification (CORS/Auth/Leaks)" \
+    python3 "$WS/recon/auto_hunter.py" --program "$target" --min-score 50 || return 1
+
+  # Phase 6: Report Compilation & Alert Dispatch
+  echo "${P}  ${B}${BLUE}◈ [Phase 6/6]${R} ⚡ ${B}Report Compilation & Alert Dispatch...${R}"
   local rep_dir="$WS/evidence/reports/$target"
   local count=0
   if [ -d "$rep_dir" ]; then
@@ -562,7 +576,7 @@ run_zero_touch_hunt() {
 
   python3 "$WS/recon/notify.py" \
     --title "🎯 Autonomous Zero-Touch Hunt Finished ($target)" \
-    --message "Autonomous hunt completed successfully across 5 phases.\nVerified Reports generated: $count\nReports Directory: evidence/reports/$target/" \
+    --message "Autonomous hunt completed successfully across 6 phases.\nVerified Reports generated: $count\nReports Directory: evidence/reports/$target/" \
     --severity "info"
 
   echo ""
@@ -623,12 +637,20 @@ target_menu() {
           local sc
           read -r -p "${P}  Choice [1-2, or 0 to cancel]: " sc
           if [ "$sc" = "1" ]; then
-            exec "$OPCODE_BIN"
+            local p_file="$WS/$target/AUTONOMOUS_HUNT_PROMPT.md"
+            if [ -f "$p_file" ]; then
+              "$OPCODE_BIN" "$WS/$target" --prompt "$(cat "$p_file")"
+            else
+              "$OPCODE_BIN" "$WS/$target"
+            fi
+            cd "$WS"
           elif [ "$sc" = "2" ]; then
             PS1="[bug-bounty:$target]\$ " bash --norc -i
+            cd "$WS"
           fi
         else
           PS1="[bug-bounty:$target]\$ " bash --norc -i
+          cd "$WS"
         fi
         ;;
       2)
@@ -751,6 +773,12 @@ new_scan_manual() {
   if [ -z "$handle" ] || [ "$handle" = "0" ] || [ "$handle" = "b" ] || [ "$handle" = "q" ]; then
     return
   fi
+  if [[ ! "$handle" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo ""
+    echo "${P}  ${RED}✗ Invalid program handle: '$handle'. Only alphanumeric characters, hyphens, and underscores are allowed.${R}"
+    sleep 2
+    return
+  fi
 
   local fname
   fname="$(normalize_name "$handle")"
@@ -868,11 +896,11 @@ new_scan() {
           [ -n "$h" ] && handles+=("$h") && names+=("$n") && bounties+=("$b")
         done < <(python3 -c "
 import json, sys
-data = json.loads('''$raw_json''')
+data = json.load(sys.stdin)
 for p in data:
     b = '💰 Bounty' if p.get('offers_bounties') else 'ℹ VDP'
     print(f\"{p['handle']}|{p['name']}|{b}\")
-")
+" <<< "$raw_json")
 
         local count="${#handles[@]}"
         if [ "$count" -eq 0 ]; then
@@ -1133,7 +1161,12 @@ main_menu() {
 
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   if [ "${1:-}" = "--auto" ] && [ -n "${2:-}" ]; then
-    run_zero_touch_hunt "$2"
+    auto_tgt="$2"
+    if [[ ! "$auto_tgt" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+      echo "Error: Invalid target name '$auto_tgt'. Only alphanumeric, hyphen, and underscore allowed." >&2
+      exit 1
+    fi
+    run_zero_touch_hunt "$auto_tgt"
     exit 0
   fi
   if [ "${1:-}" = "--daemon" ]; then

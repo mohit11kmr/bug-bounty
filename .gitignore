@@ -32,6 +32,7 @@ priceline_progress_report/
 **/NEXT_STEPS.md
 **/*_root_report.md
 **/*root_report*
+**/AUTONOMOUS_HUNT_PROMPT.md
 
 # ---- Recon/target data (program-specific, includes recon.db + candidates) ----
 recon/data/

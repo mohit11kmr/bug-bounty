@@ -147,11 +147,31 @@ def write_candidate_report(program: str, data_dir: Path, con: sqlite3.Connection
     print(f"[intel] report -> {out.relative_to(BASE)} ({len(top)} surfaces)")
 
 
+def _selfcheck() -> None:
+    print("[intelligence] Running selfcheck...")
+    score_api, tag_api = score_url("https://example.com/api/v1/users")
+    assert score_api >= 25, "API surface scoring failed"
+    assert tag_api == "api_surface", "API surface tag failed"
+
+    score_env, tag_env = score_url("https://example.com/.env")
+    assert score_env >= 30, "Config leak scoring failed"
+    assert tag_env == "config_leak", "Config leak tag failed"
+
+    hw = host_weight(200)
+    assert hw == 20, "Host weight for 200 failed"
+    print("[intelligence] selfcheck OK: URL scoring heuristics and exposure weights verified.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--program", default="meesho")
     ap.add_argument("--top", type=int, default=40, help="kitte top endpoints report me")
+    ap.add_argument("--selfcheck", action="store_true", help="run internal selfcheck")
     args = ap.parse_args()
+
+    if args.selfcheck:
+        _selfcheck()
+        return
 
     data_dir = RECON / "data" / args.program
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -159,7 +179,7 @@ def main() -> None:
     if not assets_file.exists():
         scope_yaml = BASE / args.program / "scope.yaml"
         if scope_yaml.exists():
-            import yaml, re
+            import yaml
             raw = scope_yaml.read_text(encoding="utf-8")
             try:
                 sc = yaml.safe_load(raw)
@@ -225,10 +245,13 @@ def main() -> None:
             "INSERT OR REPLACE INTO endpoints VALUES (?,?,?,?,?,?,?,?,?)",
             (x["url"], x["host"], x["method"], ",".join(x["source"]),
              x["auth_hint"], x["score"], x["tag"], x["first_seen"], x["last_seen"]))
-    # candidate queue refresh: sirf endpoint-scored 'triage' rows nikalo.
-    # Scanner/nuclei findings (vuln_* tags) aur human-triaged rows (valid/duplicate/wontfix)
+    # candidate queue refresh: sirf endpoint-scored triage rows refresh karo.
+    # Scanner findings (vuln_* tags, tech_probe) aur validated rows (VERIFIED/REJECTED/VALIDATING)
     # PRESERVE karo — intelligence.py ka kaam koi nuclear wipe nahi.
-    cur.execute("DELETE FROM candidate_findings WHERE status='triage' AND tag NOT LIKE 'vuln_%'")
+    cur.execute(
+        "DELETE FROM candidate_findings WHERE status IN ('triage', 'TRIAGED') "
+        "AND tag NOT LIKE 'vuln_%' AND tag != 'tech_probe'"
+    )
     seen = set()
     for x in scored:
         if x["score"] >= 40 and (x["url"], x["tag"]) not in seen:
@@ -236,7 +259,7 @@ def main() -> None:
             cur.execute(
                 "INSERT INTO candidate_findings "
                 "(url,host,method,tag,score,status,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,'triage',?,?) "
+                "VALUES (?,?,?,?,?,'TRIAGED',?,?) "
                 "ON CONFLICT(url, tag) DO NOTHING",
                 (x["url"], x["host"], x["method"], x["tag"], x["score"], now, now))
     con.commit()

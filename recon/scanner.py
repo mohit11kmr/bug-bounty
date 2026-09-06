@@ -3,17 +3,19 @@
 scanner.py — Guide Phase 3: Safe Scanning (scope-aware, rate-limited).
 
 Design contract (guide §9 / §14 + WS1 safety rules):
-  1. Host allowlist = meesho/scope.yaml in-scope roots ONLY (plus verified assets)
+  1. Host allowlist = verified assets from assets.json (or scope.yaml in-scope roots)
   2. Rate limits from scope.yaml (rpm, concurrency) — enforced via CLI flags
   3. Destructive/active-only template categories excluded (dos, rce-destructive,
      takeover probes that write state, etc.)
   4. Output -> evidence/scans/<program>/ (timestamped), parsed into
      candidate_findings notes for triage
   5. --dry-run (default OFF, but recommended first) prints exact commands
+  6. Writes validated targets to recon/data/<program>/raw/scanner-targets.txt
 
 Usage:
   python3 recon/scanner.py --program meesho --dry-run
   python3 recon/scanner.py --program meesho --ffuf-host superstoreapp.meesho.com --ffuf-wordlist /path/to/wordlist
+  python3 recon/scanner.py --selfcheck
 """
 
 import argparse
@@ -21,6 +23,7 @@ import json
 import sqlite3
 import subprocess
 import sys
+import urllib.parse
 from datetime import date, datetime
 from pathlib import Path
 
@@ -44,7 +47,7 @@ def load_scope(program: str) -> dict:
         sys.exit(f"[scanner] scope.yaml nahi mila: {scope_file}")
     raw = scope_file.read_text(encoding="utf-8")
     try:
-        return yaml.safe_load(raw)
+        return yaml.safe_load(raw) or {}
     except Exception:
         fixed_lines = []
         for line in raw.splitlines():
@@ -54,15 +57,86 @@ def load_scope(program: str) -> dict:
                 fixed_lines.append(f'{prefix}"{val}"')
             else:
                 fixed_lines.append(line)
-        return yaml.safe_load("\n".join(fixed_lines))
+        return yaml.safe_load("\n".join(fixed_lines)) or {}
+
+
+def make_scope_filter(scope: dict):
+    """Return fn(host) -> bool. In-scope = root match AND not excluded (wildcard aware)."""
+    roots = [str(r).lower() for r in scope.get("roots", [])]
+    excluded = [str(x).lower() for x in scope.get("excluded", [])]
+
+    def wildcard_match(host: str, patterns: list) -> bool:
+        host = host.lower().rstrip(".")
+        for p in patterns:
+            if p.startswith("*."):
+                base = p[2:]
+                if host == base or host.endswith("." + base):
+                    return True
+            elif p == host:
+                return True
+        return False
+
+    def in_scope(host: str) -> bool:
+        host = host.lower().rstrip(".")
+        if host in roots:
+            return True
+        if wildcard_match(host, excluded):
+            return False
+        return wildcard_match(host, roots)
+
+    return in_scope
+
+
+def collect_scan_targets(program: str, scope: dict) -> list[str]:
+    """Collect validated live targets from recon/data/<program>/assets.json.
+    Falls back to non-wildcard scope roots if assets.json is unavailable or empty.
+    Writes validated targets to recon/data/<program>/raw/scanner-targets.txt.
+    """
+    is_in_scope = make_scope_filter(scope)
+    data_dir = RECON / "data" / program
+    raw_dir = data_dir / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    targets = set()
+
+    # 1. Ingest from assets.json if available
+    assets_file = data_dir / "assets.json"
+    if assets_file.exists():
+        try:
+            records = json.loads(assets_file.read_text(encoding="utf-8"))
+            for r in records:
+                h = r.get("host") or ""
+                u = r.get("url") or ""
+                if not h and u:
+                    try:
+                        h = urllib.parse.urlparse(u).netloc.split(":")[0]
+                    except Exception:
+                        h = ""
+                h = h.strip().lower().rstrip(".")
+                if h and "*" not in h and is_in_scope(h):
+                    targets.add(h)
+        except Exception as e:
+            print(f"[scanner] Warning: could not parse {assets_file}: {e}", file=sys.stderr)
+
+    # 2. Fallback to scope roots (expanding wildcards to clean base domain)
+    if not targets:
+        for r in scope.get("roots", []):
+            h = str(r).replace("https://", "").replace("http://", "").rstrip("/")
+            h = h.lstrip("*.").strip().lower().rstrip(".")
+            if h and "*" not in h and is_in_scope(h):
+                targets.add(h)
+
+    validated = sorted(targets)
+    target_file = raw_dir / "scanner-targets.txt"
+    target_file.write_text("\n".join(validated) + ("\n" if validated else ""), encoding="utf-8")
+    return validated
 
 
 def in_scope_hosts(scope: dict) -> list[str]:
-    """In-scope URL-roots se unique host list (scope.yaml roots only, subdomains agar
-    explicit in scope: 'wildcards' ya root-prefixed yeha program me define hote hain)."""
+    """Legacy helper maintained for compatibility."""
     hosts = []
     for r in scope.get("roots", []):
         h = str(r).replace("https://", "").replace("http://", "").rstrip("/")
+        h = h.lstrip("*.").strip().lower().rstrip(".")
         if h and h not in hosts:
             hosts.append(h)
     return sorted(hosts)
@@ -104,27 +178,34 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
     Per-host sequential runs (har host ko apna max-time/coverage), merged jsonl —
     batching ki wajah se max-time per-scan early-expire na ho.
     """
+    if not targets:
+        print(f"[scanner] ⚠ No valid in-scope targets for {program}. Skipping Nuclei scan.")
+        return None
+
     rpm, concurrency = rate_limits(scope)
     if run_on == "live":
         d = scan_dir(program)
         tgt_file = d / f"targets_{program}.txt"
-        # produce live-probe input ourselves (scope roots union). Pehle stale content hatao.
         probe_in = "\n".join(sorted(set(targets))) + "\n"
         tgt_file.write_text(probe_in)
         probe = d / f"httpx_probe_{program}.txt"
         run(["httpx", "-l", str(tgt_file), "-silent", "-mc", "200,201,202,203,204,301,302,303,307,308",
              "-o", str(probe)], dry)
         if probe.exists() and not dry:
-            live = probe.read_text().splitlines()
+            live = [l.strip() for l in probe.read_text().splitlines() if l.strip()]
             print(f"[scanner] live hosts: {len(live)} {live}")
             targets = live or targets  # fallback: koi live nahi to all targets
     elif run_on.startswith("list:"):
         targets = [t for t in run_on[5:].split(",") if t in targets]
+
+    if not targets:
+        print(f"[scanner] ⚠ No responding targets for Nuclei on {program}.")
+        return None
+
     print(f"[scanner] nuclei targets: {len(targets)}")
     d = scan_dir(program)
     stamp = date.today().isoformat()
     out_jsonl = d / f"nuclei_{program}_{stamp}.jsonl"
-    # remove old same-day output to avoid appends confusion
     if out_jsonl.exists():
         out_jsonl.unlink()
     base = [
@@ -139,7 +220,6 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
         "-nc",
     ]
     for idx, t in enumerate(targets, 1):
-        # t = full URL ho sakta hai (httpx probe output se); sirf host extract karo
         if "://" in t:
             host = t.split("://", 1)[1].split("/", 1)[0]
         else:
@@ -181,6 +261,7 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
                     merged.write(content if content.endswith("\n") else content + "\n")
             host_out.unlink(missing_ok=True)
         print(f"  [scanner] ✓ Host '{host}' finished in {dur:.1f}s ({host_hits} findings).", flush=True)
+
     if not dry and out_jsonl.exists():
         n = len(out_jsonl.read_text().splitlines())
         print(f"[scanner] nuclei findings: {n} -> {out_jsonl.relative_to(BASE)}")
@@ -195,11 +276,10 @@ def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
     db.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db)
     cur = con.cursor()
-    # table create kar do agar intelligence se pehle chala to (pipeline order-independent)
     cur.execute("""CREATE TABLE IF NOT EXISTS candidate_findings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         url TEXT, host TEXT, method TEXT,
-        tag TEXT, score INTEGER, status TEXT DEFAULT 'triage',
+        tag TEXT, score INTEGER, status TEXT DEFAULT 'TRIAGED',
         confidence REAL DEFAULT 0.0,
         notes TEXT DEFAULT '',
         created_at TEXT, updated_at TEXT,
@@ -228,7 +308,7 @@ def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
         conf = {"critical": 0.9, "high": 0.8, "medium": 0.65, "low": 0.5}.get(sev, 0.4)
         cur.execute(
             "INSERT INTO candidate_findings (url,host,method,tag,score,status,confidence,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,'triage',?,?,?) "
+            "VALUES (?,?,?,?,?,'TRIAGED',?,?,?) "
             "ON CONFLICT(url, tag) DO UPDATE SET "
             "score=MAX(score, excluded.score), confidence=MAX(confidence, excluded.confidence), "
             "notes=CASE WHEN notes='' THEN ? ELSE notes || ' | ' || ? END, updated_at=excluded.updated_at",
@@ -255,8 +335,8 @@ def ffuf_check(program: str, scope: dict, host: str, wordlist: str, dry: bool) -
         "-o", str(out),
         "-of", "json",
         "-mc", "200,201,202,203,204,301,302,307,308,401,403",
-        "-rate", str(max(1, rpm // 4)),          # wordlist scan = higher volume, keep under rpm
-        "-p", "0.1",                              # ~100ms pause -> ~10 req/sec max
+        "-rate", str(max(1, rpm // 4)),
+        "-p", "0.1",
         "-t", str(concurrency),
     ]
     print(f"[scanner] ffuf host={clean_host} wordlist={Path(wordlist).name}")
@@ -265,20 +345,57 @@ def ffuf_check(program: str, scope: dict, host: str, wordlist: str, dry: bool) -
         print(f"[scanner] ffuf output -> {out.relative_to(BASE)}")
 
 
+def _selfcheck() -> None:
+    print("[scanner] Running selfcheck...")
+    mock_scope = {
+        "roots": ["*.example.com", "target.org"],
+        "excluded": ["excluded.example.com"],
+        "rate_limits": {"rpm": 120, "concurrency": 8}
+    }
+    filt = make_scope_filter(mock_scope)
+    assert filt("test.example.com") is True
+    assert filt("example.com") is True
+    assert filt("target.org") is True
+    assert filt("excluded.example.com") is False
+    assert filt("external.net") is False
+
+    rpm, conc = rate_limits(mock_scope)
+    assert rpm == 120
+    assert conc == 8
+
+    # Target expansion test
+    hosts = in_scope_hosts(mock_scope)
+    assert "example.com" in hosts
+    assert "target.org" in hosts
+    print("[scanner] selfcheck OK: Scope filter, rate limits and target extraction verified.")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--program", required=True, help="program folder name (e.g. meesho, kayak, general)")
+    ap.add_argument("--program", help="program folder name (e.g. meesho, kayak, general)")
     ap.add_argument("--dry-run", action="store_true", help="commands dikhao, chalao nahi")
     ap.add_argument("--run-on", default=DEFAULT_RUN_ON,
                     help="live|all|list:h1,h2 — nuclei targets kya ho")
     ap.add_argument("--no-nuclei", action="store_true")
     ap.add_argument("--ffuf-host")
     ap.add_argument("--ffuf-wordlist")
+    ap.add_argument("--selfcheck", action="store_true", help="run internal selfcheck")
     args = ap.parse_args()
 
+    if args.selfcheck:
+        _selfcheck()
+        return
+
+    if not args.program:
+        sys.exit("[scanner] Error: --program is required (unless running --selfcheck).")
+
     scope = load_scope(args.program)
-    targets = in_scope_hosts(scope)
-    print(f"[scanner] program={args.program} in-scope hosts={len(targets)}")
+    targets = collect_scan_targets(args.program, scope)
+    print(f"[scanner] program={args.program} valid in-scope targets={len(targets)}")
+
+    if not targets:
+        print(f"[scanner] Notice: No valid in-scope targets found for {args.program}. Exiting cleanly.")
+        return
 
     if not args.no_nuclei:
         out = nuclei_scan(args.program, scope, targets, args.dry_run, args.run_on)
@@ -286,7 +403,8 @@ def main() -> None:
             import_nuclei_findings(out, args.program)
 
     if args.ffuf_host:
-        if args.ffuf_host not in targets:
+        filt = make_scope_filter(scope)
+        if not filt(args.ffuf_host):
             sys.exit(f"[scanner] ffuf host out-of-scope: {args.ffuf_host}")
         ffuf_check(args.program, scope, args.ffuf_host, args.ffuf_wordlist, args.dry_run)
 

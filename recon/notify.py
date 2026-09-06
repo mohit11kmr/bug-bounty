@@ -23,6 +23,8 @@ import os
 import shutil
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -78,7 +80,7 @@ def send_telegram_alert(title: str, message: str, severity: str = "info") -> boo
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
-    if not bot_token or not chat_id:
+    if not bot_token or not chat_id or chat_id == "0":
         return False
 
     sev_emoji = {
@@ -106,6 +108,29 @@ def send_telegram_alert(title: str, message: str, severity: str = "info") -> boo
         )
         with urllib.request.urlopen(req, timeout=8) as resp:
             return resp.status == 200
+    except urllib.error.HTTPError as e:
+        if e.code == 400 and "parse_mode" in payload:
+            try:
+                # Retry as plain text without Markdown formatting
+                payload.pop("parse_mode", None)
+                payload["text"] = f"{sev_emoji} [{severity.upper()}] {title}\n\n{message}"
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    url,
+                    data=data,
+                    headers={"Content-Type": "application/json", "User-Agent": "BugBounty-Notifier/1.0"},
+                )
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    return resp.status == 200
+            except Exception:
+                pass
+        err_msg = ""
+        try:
+            err_msg = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            pass
+        print(f"[notify] Telegram alert failed ({e.code}): {err_msg or e}", file=sys.stderr)
+        return False
     except Exception as e:
         print(f"[notify] Telegram alert failed: {e}", file=sys.stderr)
         return False
@@ -200,6 +225,22 @@ def poll_for_chat_id(token: str, max_wait: int = 45) -> tuple[str, str]:
     """Poll getUpdates to automatically capture user's chat_id when they press /start."""
     url = f"https://api.telegram.org/bot{token}/getUpdates"
     req = urllib.request.Request(url, headers={"User-Agent": "BugBounty-Notifier/1.0"})
+
+    # Check immediately if user has already messaged the bot
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get("ok") and data.get("result"):
+                for update in reversed(data["result"]):
+                    msg = update.get("message") or update.get("channel_post")
+                    if msg and "chat" in msg:
+                        chat_id = str(msg["chat"]["id"])
+                        name = msg["chat"].get("first_name", "") or msg["chat"].get("username", "User")
+                        print(f"\n  [telegram] ✓ Detected existing message from: {name} (Chat ID: {chat_id})", flush=True)
+                        return chat_id, name
+    except Exception:
+        pass
+
     start_t = time.time()
     while time.time() - start_t < max_wait:
         remaining = int(max_wait - (time.time() - start_t))
@@ -253,7 +294,7 @@ def interactive_telegram_setup() -> None:
     current_chat = os.environ.get("TELEGRAM_CHAT_ID", "")
     current_phone = os.environ.get("NOTIFY_PHONE_NUMBER", "")
 
-    if current_chat and current_token:
+    if current_chat and current_token and current_chat != "0":
         masked_token = current_token[:8] + "..." + current_token[-6:]
         print(f"  \033[38;5;48m● Current Status:\033[0m \033[1mCONFIGURED & ACTIVE\033[0m")
         print(f"    - Telegram Chat ID : \033[38;5;51m{current_chat}\033[0m")
@@ -350,7 +391,7 @@ def interactive_telegram_setup() -> None:
             print("  \033[38;5;196mError: Token and Chat ID are required.\033[0m")
 
     elif choice == "3":
-        if not (current_token and current_chat):
+        if not (current_token and current_chat and current_chat != "0"):
             print("\n  \033[38;5;196mError: Telegram abhi configured nahi hai. Pehle option [1] ya [2] run karein.\033[0m\n")
             return
         print("\n  [telegram] Sending test alert to your phone...", flush=True)
@@ -416,7 +457,7 @@ def main() -> None:
 
     if args.status:
         load_notify_env()
-        t_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+        t_ok = bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID") and os.environ.get("TELEGRAM_CHAT_ID") != "0")
         d_ok = bool(os.environ.get("DISCORD_WEBHOOK_URL"))
         desk_ok = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
         phone = os.environ.get("NOTIFY_PHONE_NUMBER", "Not set")

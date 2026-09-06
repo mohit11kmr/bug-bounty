@@ -173,8 +173,12 @@ def generate_markdown_report(program: str, finding: dict) -> tuple[str, Path]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
 
+    # Verification status
+    is_verified = finding.get("status") == "VERIFIED" or finding.get("verified") is True
+    status_label = "VERIFIED" if is_verified else "TRIAGE CANDIDATE"
+
     # Title
-    title = finding.get("title") or f"[{meta['severity']}] {meta['name']} on {host}"
+    title = finding.get("title") or f"[{status_label}] [{meta['severity']}] {meta['name']} on {host}"
 
     # Default impacts
     if not impact:
@@ -243,7 +247,9 @@ This issue allows an unauthenticated external attacker to access sensitive surfa
 ---
 
 ## 2. Technical Details & Evidence
-The surface was discovered and verified during authorized scope testing.
+**Verification Status:** `{status_label}`
+
+The surface was discovered and processed during authorized scope testing.
 {notes}
 
 ### Non-Destructive Proof-of-Concept (curl):
