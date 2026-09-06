@@ -18,6 +18,7 @@ Usage:
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -133,11 +134,13 @@ def make_scope_filter(scope: dict):
 
     def in_scope(host: str) -> bool:
         host = host.lower().rstrip(".")
-        if host in roots:
+        bare = host.split(":")[0]
+        variants = [host] if host == bare else [host, bare]
+        if any(v in roots for v in variants):
             return True
-        if wildcard_match(host, excluded):
+        if any(wildcard_match(v, excluded) for v in variants):
             return False
-        return wildcard_match(host, roots)
+        return any(wildcard_match(v, roots) for v in variants)
 
     return in_scope
 
@@ -184,6 +187,7 @@ def run_katana_crawl(targets: list[str], output_jsonl: Path, rpm: int, concurren
     targets_file = output_jsonl.parent / "katana_targets.txt"
     targets_file.write_text("\n".join(targets) + "\n")
 
+    crawl_dur = os.environ.get("KATANA_CRAWL_DURATION", "5m")
     cmd = [
         "katana",
         "-list", str(targets_file),
@@ -191,6 +195,7 @@ def run_katana_crawl(targets: list[str], output_jsonl: Path, rpm: int, concurren
         "-jsl",                 # enable jsluice parsing in js files
         "-xhr",                 # extract xhr request url and method
         "-depth", "2",
+        "-ct", crawl_dur,
         "-c", str(concurrency),
         "-rate-limit", str(max(1, rpm // 2)),
         "-kf", "all",
@@ -380,6 +385,13 @@ def main() -> None:
     if not args.dry_run:
         added = merge_into_database(args.program, sorted(in_scope_discovered), secrets)
         print(f"[js_miner] Done. Total in-scope JS endpoints discovered: {len(in_scope_discovered)} ({added} new)")
+        # Deterministically trigger application model generation when endpoints are saved
+        app_script = Path(__file__).resolve().parent / "application_model.py"
+        ep_file = Path(__file__).resolve().parent / "data" / args.program / "endpoints.json"
+        if app_script.exists() and ep_file.exists():
+            subprocess.run([sys.executable, str(app_script), "--program", args.program],
+                           cwd=str(Path(__file__).resolve().parent.parent), capture_output=True, text=True, check=False)
+            print(f"[js_miner] ✓ Generated application_model.json context layer.")
 
 
 if __name__ == "__main__":

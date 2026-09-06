@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS candidate_findings (
     url TEXT, host TEXT, method TEXT,
     tag TEXT, score INTEGER, status TEXT DEFAULT 'triage',  -- triage|valid|invalid|duplicate
     confidence REAL DEFAULT 0.0,
+    tool TEXT DEFAULT 'heuristic',
     notes TEXT DEFAULT '',
     created_at TEXT, updated_at TEXT,
     UNIQUE(url, tag)
@@ -208,7 +209,10 @@ def main() -> None:
     # host -> exposure
     status_map = {}
     for a in assets:
-        status_map[a["host"]] = a.get("status")
+        h = a.get("host", "").lower().strip()
+        status_map[h] = a.get("status")
+        if ":" in h:
+            status_map[h.split(":")[0]] = a.get("status")
     for u in endpoints:
         url = u["url"]
         m = re.match(r"https?://([^/:]+)", url)
@@ -231,6 +235,10 @@ def main() -> None:
     con = sqlite3.connect(db_path)
     cur = con.cursor()
     cur.executescript(SCHEMA)
+    cols = [c[1] for c in cur.execute("PRAGMA table_info(candidate_findings)").fetchall()]
+    if "tool" not in cols:
+        cur.execute("ALTER TABLE candidate_findings ADD COLUMN tool TEXT DEFAULT 'heuristic'")
+
     cur.execute("DELETE FROM assets")
     cur.execute("DELETE FROM endpoints")
     now = date.today().isoformat()
@@ -258,8 +266,8 @@ def main() -> None:
             seen.add((x["url"], x["tag"]))
             cur.execute(
                 "INSERT INTO candidate_findings "
-                "(url,host,method,tag,score,status,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,'TRIAGED',?,?) "
+                "(url,host,method,tag,score,status,confidence,tool,notes,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,'TRIAGED',0.5,'intelligence','Discovered via heuristic surface analysis',?,?) "
                 "ON CONFLICT(url, tag) DO NOTHING",
                 (x["url"], x["host"], x["method"], x["tag"], x["score"], now, now))
     con.commit()

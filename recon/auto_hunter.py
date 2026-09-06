@@ -91,11 +91,13 @@ def make_scope_filter(scope: dict):
 
     def in_scope(host: str) -> bool:
         host = host.lower().rstrip(".")
-        if host in roots:
+        bare = host.split(":")[0]
+        variants = [host] if host == bare else [host, bare]
+        if any(v in roots for v in variants):
             return True
-        if wildcard_match(host, excluded):
+        if any(wildcard_match(v, excluded) for v in variants):
             return False
-        return wildcard_match(host, roots)
+        return any(wildcard_match(v, roots) for v in variants)
 
     return in_scope
 
@@ -133,7 +135,7 @@ def verify_candidate(candidate: dict, is_in_scope) -> dict | None:
     score = candidate.get("score", 0)
 
     try:
-        host = urllib.parse.urlparse(url).netloc.split(":")[0].lower()
+        host = urllib.parse.urlparse(url).netloc.lower()
     except Exception:
         return None
 
@@ -269,10 +271,12 @@ def run_auto_hunter(program: str, min_score: int = 50, dry_run: bool = False) ->
             print(f"     ↳ {verified['notes']}", flush=True)
             verified_findings.append(verified)
 
-            # Update DB status to VERIFIED
+            # Update DB status to VERIFIED — also correct the tag, since verification
+            # can reclassify a candidate (e.g. a generic "normal" surface turns out to
+            # be the specific cors_misconfig it was probed for).
             cur.execute(
-                "UPDATE candidate_findings SET status='VERIFIED', confidence=?, notes=?, updated_at=? WHERE id=?",
-                (verified["confidence"], verified["notes"], datetime.now().isoformat(), cid),
+                "UPDATE candidate_findings SET status='VERIFIED', tag=?, confidence=?, notes=?, updated_at=? WHERE id=?",
+                (verified["tag"], verified["confidence"], verified["notes"], datetime.now().isoformat(), cid),
             )
             con.commit()
 

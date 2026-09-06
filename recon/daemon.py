@@ -80,11 +80,13 @@ def make_scope_filter(scope: dict):
 
     def in_scope(host: str) -> bool:
         host = host.lower().rstrip(".")
-        if host in roots:
+        bare = host.split(":")[0]
+        variants = [host] if host == bare else [host, bare]
+        if any(v in roots for v in variants):
             return True
-        if wildcard_match(host, excluded):
+        if any(wildcard_match(v, excluded) for v in variants):
             return False
-        return wildcard_match(host, roots)
+        return any(wildcard_match(v, roots) for v in variants)
 
     return in_scope
 
@@ -231,6 +233,10 @@ def run_delta_cycle(program: str, dry_run: bool = False) -> int:
     # 3. Trigger JS Miner on new assets
     print("[daemon] 📦 Running JS Miner on new assets...")
     subprocess.run([sys.executable, str(RECON / "js_miner.py"), "--program", program], check=False)
+
+    # 3b. Trigger Safe Vulnerability Scanner (Nuclei) on newly discovered assets
+    print("[daemon] 🛡️ Running safe vulnerability scanner on updated assets...")
+    subprocess.run([sys.executable, str(RECON / "scanner.py"), "--program", program], check=False)
 
     # 4. Trigger Intelligence Scoring
     print("[daemon] ⚡ Prioritizing new surfaces with intelligence.py...")

@@ -38,8 +38,8 @@ GREEN=$'\e[38;5;48m'; GOLD=$'\e[38;5;220m'; ORANGE=$'\e[38;5;208m'
 RED=$'\e[38;5;196m'; MUTED=$'\e[38;5;244m'; BORDER=$'\e[38;5;239m'
 LINE=$'\e[38;5;241m'
 
-# ---- Desktop Auto-Wrap ----
-if [ ! -t 1 ] && [ "${BASH_LAUNCHER_NOTTY:-0}" != "1" ]; then
+# ---- Desktop Auto-Wrap (Only for interactive double-click launch with 0 arguments) ----
+if [ ! -t 1 ] && [ "$#" -eq 0 ] && [ "${BASH_LAUNCHER_NOTTY:-0}" != "1" ]; then
   exec xfce4-terminal --title="Bug Bounty — Mission Control" \
     --geometry=120x36 --working-directory="$WS" \
     -e "bash -lc 'exec \"$0\"'"
@@ -424,6 +424,7 @@ run_phase() {
 # =============================================================================
 run_complete_hunt() {
   local target="$1"
+  local fresh_flag="${2:-}"
   clear
   title_box " 🚀 COMPLETE AUTONOMOUS SCAN & HUNT " "$target"
   echo ""
@@ -433,8 +434,9 @@ run_complete_hunt() {
   sep
 
   # Phase 1: Recon Pipeline (Subdomains + HTTP probing + Archive URLs, skip duplicate JS)
-  run_phase 1 5 "Subdomain Enumeration & Alive Probing (httpx)" \
-    python3 "$WS/recon/recon_pipeline.py" --program "$target" --skip-js || return 1
+  local recon_cmd=(python3 "$WS/recon/recon_pipeline.py" --program "$target" --skip-js)
+  [ -n "$fresh_flag" ] && recon_cmd+=("$fresh_flag")
+  run_phase 1 5 "Subdomain Enumeration & Alive Probing (httpx)" "${recon_cmd[@]}" || return 1
 
   # Phase 2: Client-side JS Miner & Route Extraction (Katana)
   run_phase 2 5 "Client-side Route & Secret Extraction (Katana)" \
@@ -538,6 +540,7 @@ run_complete_hunt() {
 # =============================================================================
 run_zero_touch_hunt() {
   local target="$1"
+  local fresh_flag="${2:-}"
   clear
   title_box " 🤖 AUTONOMOUS ZERO-TOUCH HUNT " "$target"
   echo ""
@@ -547,8 +550,9 @@ run_zero_touch_hunt() {
   sep
 
   # Phase 1: Recon Pipeline (Subdomains + Alive Probing, skip duplicate JS)
-  run_phase 1 6 "Reconnaissance & Asset Probing" \
-    python3 "$WS/recon/recon_pipeline.py" --program "$target" --skip-js || return 1
+  local recon_cmd=(python3 "$WS/recon/recon_pipeline.py" --program "$target" --skip-js)
+  [ -n "$fresh_flag" ] && recon_cmd+=("$fresh_flag")
+  run_phase 1 6 "Reconnaissance & Asset Probing" "${recon_cmd[@]}" || return 1
 
   # Phase 2: Client-side JS Miner
   run_phase 2 6 "Client-side Route & Secret Extraction" \
@@ -586,8 +590,9 @@ run_zero_touch_hunt() {
     echo "${P}  ${B}Reports Directory:${R} ${CYAN}$rep_dir/${R}"
   fi
   echo ""
-  sep
-  read -r -p "${P}  Press Enter or [0] to return... " _
+  if [ -t 0 ]; then
+    read -r -p "${P}  Press Enter or [0] to return... " _
+  fi
 }
 
 # =============================================================================
@@ -605,7 +610,8 @@ target_menu() {
     echo ""
     sep
     echo "${P}  ${B}Recommended Actions:${R}"
-    opt "A" "🤖 AUTONOMOUS ZERO-TOUCH HUNT"      "Recon → JS → Triage → Verify → Draft Report"
+    opt "A" "🤖 AUTONOMOUS ZERO-TOUCH HUNT"      "Standard hunt (re-uses cached discovery)"
+    opt "F" "⚡ FRESH ZERO-TOUCH HUNT (Force)"   "Bypass cache & force 100% fresh discovery"
     opt "C" "🚀 Complete Scan & OpenCode Prompt" "Standard workflow with AI agent prompt"
     echo ""
     echo "${P}  ${B}Individual Pipeline Modules:${R}"
@@ -620,11 +626,14 @@ target_menu() {
     echo ""
     sep
     local act
-    read -r -p "${P}  ${B}Action for [$target]${R} [A/C/0-7, or B to return]: " act
+    read -r -p "${P}  ${B}Action for [$target]${R} [A/F/C/0-7, or B to return]: " act
 
     case "$act" in
       [aA]*)
         run_zero_touch_hunt "$target"
+        ;;
+      [fF]*)
+        run_zero_touch_hunt "$target" "--fresh"
         ;;
       [cC]*)
         run_complete_hunt "$target"
@@ -1162,11 +1171,16 @@ main_menu() {
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   if [ "${1:-}" = "--auto" ] && [ -n "${2:-}" ]; then
     auto_tgt="$2"
+    fresh_flag="${3:-}"
     if [[ ! "$auto_tgt" =~ ^[a-zA-Z0-9_-]+$ ]]; then
       echo "Error: Invalid target name '$auto_tgt'. Only alphanumeric, hyphen, and underscore allowed." >&2
       exit 1
     fi
-    run_zero_touch_hunt "$auto_tgt"
+    if [ -n "$fresh_flag" ]; then
+      run_zero_touch_hunt "$auto_tgt" "$fresh_flag"
+    else
+      run_zero_touch_hunt "$auto_tgt"
+    fi
     exit 0
   fi
   if [ "${1:-}" = "--daemon" ]; then

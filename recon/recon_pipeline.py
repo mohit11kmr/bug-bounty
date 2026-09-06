@@ -12,11 +12,14 @@ Output (per program, recon/data/<program>/):
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
+import uuid
 from datetime import date, datetime
 from pathlib import Path
+from typing import Tuple, List, Dict, Any
 
 BASE = Path(__file__).resolve().parent.parent  # bug-bounty/
 RECON = BASE / "recon"
@@ -105,18 +108,72 @@ def make_scope_filter(scope: dict):
 
     def in_scope(host: str) -> bool:
         host = host.lower().rstrip(".")
+        bare = host.split(":")[0]
+        # Non-standard-port targets are recorded in scope.yaml/assets as "host:port";
+        # callers sometimes pass the bare host (port stripped from a URL netloc) —
+        # check both forms so a real host:port root isn't falsely reported out-of-scope.
+        variants = [host] if host == bare else [host, bare]
         # 1) Explicit root match — hamesha in-scope (wildcard exclusions "barring" ko respect karo)
-        if host in roots:
+        if any(v in roots for v in variants):
             return True
         # 2) Exclusion match — out-of-scope (wildcard included)
-        if wildcard_match(host, excluded):
+        if any(wildcard_match(v, excluded) for v in variants):
             return False
         # 3) Root subdomain match — in-scope
-        return wildcard_match(host, roots)
+        return any(wildcard_match(v, roots) for v in variants)
     return in_scope
 
 
-def collect_assets(scope: dict, raw: Path) -> list:
+def validate_jsonl_output(path: Path) -> Tuple[str, List[dict]]:
+    """
+    Validates a JSONL output file.
+    Returns (status, valid_records) where status is:
+      - 'MISSING': file does not exist
+      - 'EMPTY': file exists but is 0 bytes or has 0 valid records
+      - 'PARTIAL': file contains some valid and some malformed lines
+      - 'VALID': all non-empty lines are valid JSON records
+    """
+    if not path.exists():
+        return "MISSING", []
+    if path.stat().st_size == 0:
+        return "EMPTY", []
+
+    valid = []
+    malformed = 0
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                if isinstance(rec, dict) and (rec.get("url") or rec.get("input")):
+                    valid.append(rec)
+                else:
+                    malformed += 1
+            except Exception:
+                malformed += 1
+
+    if not valid:
+        return "EMPTY", []
+    if malformed > 0:
+        return "PARTIAL", valid
+    return "VALID", valid
+
+
+def validate_assets_list(assets: list) -> Tuple[str, List[dict]]:
+    """Validates the in-memory Asset[] list before disk persistence."""
+    if not isinstance(assets, list):
+        return "MALFORMED", []
+    if len(assets) == 0:
+        return "EMPTY", []
+    valid = [a for a in assets if isinstance(a, dict) and a.get("host")]
+    if len(valid) == len(assets):
+        return "VALID", valid
+    return "PARTIAL", valid
+
+
+def collect_assets(scope: dict, raw: Path, fresh: bool = False) -> list:
     """Asset[] — guide §8: host, ip, status, title, tech, source, first_seen, last_seen."""
     is_in_scope = make_scope_filter(scope)
     roots = [str(r) for r in (scope.get("roots") or [])]
@@ -124,15 +181,23 @@ def collect_assets(scope: dict, raw: Path) -> list:
     dnsx_out = raw / "dnsx.txt"
     httpx_out = raw / "httpx.jsonl"
 
+    if fresh:
+        log("  ⚡ [FRESH] Purging cached discovery files. Forcing re-enumeration.")
+        subfinder_out.unlink(missing_ok=True)
+        dnsx_out.unlink(missing_ok=True)
+        httpx_out.unlink(missing_ok=True)
+
     # 1) subdomain discovery (passive) — roots se subfinder per-domain
     if not subfinder_out.exists() or subfinder_out.stat().st_size == 0:
         log(f"⚡ [1/3] Starting passive subdomain enumeration across {len(roots)} root targets...")
         all_subs = set()
         for idx, r in enumerate(roots, 1):
-            clean_root = r.lstrip("*.").strip()
+            clean_root = r.lstrip("*.").strip().split(":")[0]
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", clean_root) or clean_root.lower() == "localhost":
+                continue
             print(f"  [recon] [{idx}/{len(roots)}] 🔍 Running subfinder on '{clean_root}'...", end="", flush=True)
             t_start = datetime.now()
-            res = subprocess.run(["subfinder", "-d", clean_root, "-silent"],
+            res = subprocess.run(["subfinder", "-d", clean_root, "-silent", "-timeout", "10"],
                                  capture_output=True, text=True, check=False)
             found = [line.strip().lower() for line in res.stdout.splitlines() if line.strip()]
             all_subs.update(found)
@@ -142,7 +207,7 @@ def collect_assets(scope: dict, raw: Path) -> list:
             f.write("\n".join(sorted(all_subs)) + "\n")
         log(f"  ✓ Total passive subdomains discovered: {len(all_subs)}")
     else:
-        log(f"  subfinder.txt already exists ({len(subfinder_out.read_text().splitlines())} lines) — reusing")
+        log(f"  [CACHE REUSE] subfinder.txt already exists ({len(subfinder_out.read_text().splitlines())} lines) — reusing historical discovery. (Pass --fresh to re-enumerate)")
 
     subs = set()
     if subfinder_out.exists():
@@ -159,6 +224,8 @@ def collect_assets(scope: dict, raw: Path) -> list:
         run(["dnsx", "-l", str(raw / "hosts.txt"), "-silent", "-o", str(dnsx_out)], dnsx_out)
         res_count = len(dnsx_out.read_text().splitlines()) if dnsx_out.exists() else 0
         log(f"  ✓ DNS resolved: {res_count}/{len(hosts)} hosts responding")
+    elif dnsx_out.exists():
+        log(f"  [CACHE REUSE] dnsx.txt already exists ({len(dnsx_out.read_text().splitlines())} lines) — reusing historical resolution. (Pass --fresh to re-enumerate)")
 
     # 3) HTTP probe + tech detect
     resolved_hosts = []
@@ -172,14 +239,16 @@ def collect_assets(scope: dict, raw: Path) -> list:
         f.write("\n".join(probe_hosts))
     log(f"⚡ [3/3] Probing HTTP services, status & tech across {len(probe_hosts)} hosts with httpx...")
     
+    # SINGLE PRODUCER ARCHITECTURE:
+    # httpx outputs strictly to stdout; Python process alone writes the atomic temporary file.
     cmd = ["httpx", "-l", str(probe_in), "-silent",
            "-json", "-tech-detect", "-status-code", "-title",
-           "-threads", str(RATE_LIMIT["concurrency"]), "-rate-limit", "60",
-           "-o", str(httpx_out)]
+           "-threads", str(RATE_LIMIT["concurrency"]), "-rate-limit", "60"]
     
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    httpx_tmp = raw / f"httpx.{os.getpid()}.tmp"
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     live_count = 0
-    with open(httpx_out, "w") as out_f:
+    with open(httpx_tmp, "w", encoding="utf-8") as out_f:
         for line in proc.stdout:
             out_f.write(line)
             out_f.flush()
@@ -196,17 +265,27 @@ def collect_assets(scope: dict, raw: Path) -> list:
                     print(f"  [alive] ✓ {url} [{status}]{tech_str}{title_str}", flush=True)
             except Exception:
                 pass
-    proc.wait()
-    log(f"  ✓ HTTP probing complete: {live_count} live web endpoints detected")
+    _, stderr_data = proc.communicate()
+    
+    # Atomic validation & commit
+    v_status, valid_records = validate_jsonl_output(httpx_tmp)
+    if v_status in ("VALID", "PARTIAL") and valid_records:
+        os.replace(httpx_tmp, httpx_out)
+        log(f"  ✓ HTTP probing complete: {len(valid_records)} live web endpoints detected (Contract: {v_status})")
+    elif v_status == "EMPTY":
+        httpx_tmp.unlink(missing_ok=True)
+        log(f"  ⚠ HTTP probing returned 0 responsive endpoints across {len(probe_hosts)} candidate hosts (Contract: EMPTY).")
+    else:
+        httpx_tmp.unlink(missing_ok=True)
+        log(f"  ✖ HTTP probing output was malformed (Contract: {v_status}). Stderr: {stderr_data.strip()[:120]}")
+
+    # If httpx_out exists from atomic commit or valid previous run, parse records
+    if not valid_records and httpx_out.exists():
+        _, valid_records = validate_jsonl_output(httpx_out)
 
     now = date.today().isoformat()
     assets = []
-    probe_lines = httpx_out.read_text().splitlines() if httpx_out.exists() else []
-    for line in probe_lines:
-        try:
-            h = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for h in valid_records:
         assets.append({
             "host": h.get("input", ""),
             "url": h.get("url", ""),
@@ -222,15 +301,22 @@ def collect_assets(scope: dict, raw: Path) -> list:
     return assets
 
 
-def collect_endpoints(scope: dict, raw: Path) -> list:
+def collect_endpoints(scope: dict, raw: Path, fresh: bool = False) -> list:
     """Endpoint[] — guide §8: url, method, source, auth_hint. Out-of-scope URLs dropped."""
     is_in_scope = make_scope_filter(scope)
     gau_out = raw / "gau.txt"
+    if fresh:
+        log("  ⚡ [FRESH] Purging cached gau.txt. Forcing archive re-harvesting.")
+        gau_out.unlink(missing_ok=True)
+
     if not gau_out.exists() or gau_out.stat().st_size == 0:
         roots_clean = [str(r).lstrip("*.").strip() for r in (scope.get("roots") or [])]
         log(f"📜 Querying Wayback Machine, AlienVault & URLScan across {len(roots_clean)} roots...")
         all_urls = set()
         for idx, r in enumerate(roots_clean, 1):
+            clean_r = r.split(":")[0]
+            if re.match(r"^\d+\.\d+\.\d+\.\d+$", clean_r) or clean_r.lower() == "localhost":
+                continue
             print(f"  [archive] [{idx}/{len(roots_clean)}] 🌐 Harvesting archive URLs for '{r}'...", end="", flush=True)
             t_start = datetime.now()
             res = subprocess.run(["gau", "--threads", "5", "--subs", r],
@@ -244,7 +330,7 @@ def collect_endpoints(scope: dict, raw: Path) -> list:
             f.write("\n".join(sorted(all_urls)) + "\n")
         log(f"  ✓ Archive harvesting complete: {len(all_urls)} unique in-scope URLs collected")
     else:
-        log(f"  gau.txt exists ({len(gau_out.read_text().splitlines())} lines) — reusing")
+        log(f"  [CACHE REUSE] gau.txt exists ({len(gau_out.read_text().splitlines())} lines) — reusing historical archive discovery. (Pass --fresh to re-harvest)")
 
     urls = set()
     if gau_out.exists():
@@ -281,6 +367,38 @@ def _selfcheck() -> None:
     assert is_in_scope("api.target.com") is True
     assert is_in_scope("excluded.target.com") is False
     assert is_in_scope("out-of-scope.com") is False
+
+    # Contract test: validate_jsonl_output
+    tmp_dir = BASE / "recon" / "data" / ".cache" / f"test_check_{os.getpid()}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        f_missing = tmp_dir / "nonexistent.jsonl"
+        st, recs = validate_jsonl_output(f_missing)
+        assert st == "MISSING" and len(recs) == 0, "MISSING check failed"
+
+        f_empty = tmp_dir / "empty.jsonl"
+        f_empty.write_text("")
+        st, recs = validate_jsonl_output(f_empty)
+        assert st == "EMPTY" and len(recs) == 0, "EMPTY check failed"
+
+        f_valid = tmp_dir / "valid.jsonl"
+        f_valid.write_text('{"url": "https://example.com", "status_code": 200}\n')
+        st, recs = validate_jsonl_output(f_valid)
+        assert st == "VALID" and len(recs) == 1, "VALID check failed"
+
+        f_partial = tmp_dir / "partial.jsonl"
+        f_partial.write_text('{"url": "https://example.com"}\ncorrupted_line\n')
+        st, recs = validate_jsonl_output(f_partial)
+        assert st == "PARTIAL" and len(recs) == 1, "PARTIAL check failed"
+
+        # Contract test: validate_assets_list
+        assert validate_assets_list([]) == ("EMPTY", [])
+        assert validate_assets_list([{"host": "example.com"}])[0] == "VALID"
+        assert validate_assets_list([{"no_host": 1}])[0] == "PARTIAL"
+    finally:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
     print("[recon_pipeline] selfcheck OK: Scope filter and data contracts verified.")
 
 
@@ -289,6 +407,8 @@ def main() -> None:
     ap.add_argument("--program", default="meesho", help="program folder name")
     ap.add_argument("--skip-endpoints", action="store_true", help="gau skip (slow)")
     ap.add_argument("--skip-js", action="store_true", help="skip katana JS crawl & mining")
+    ap.add_argument("--fresh", "--force", dest="fresh", action="store_true",
+                    help="force fresh enumeration, bypassing and refreshing cached raw files (subfinder, dnsx, httpx, gau)")
     ap.add_argument("--selfcheck", action="store_true", help="run internal selfcheck")
     args = ap.parse_args()
 
@@ -306,14 +426,20 @@ def main() -> None:
 
     roots = scope.get("roots") or []
     excluded = scope.get("excluded") or []
-    log(f"program={args.program} | roots={len(roots)} | excluded={len(excluded)}")
+    log(f"program={args.program} | roots={len(roots)} | excluded={len(excluded)} | fresh={args.fresh}")
     log("=== Phase 1: Asset discovery ===")
-    assets = collect_assets(scope, raw)
+    assets = collect_assets(scope, raw, fresh=args.fresh)
+    a_status, valid_assets = validate_assets_list(assets)
+    if a_status == "EMPTY":
+        log("  ⚠ 0 active web assets found. assets.json written as [] (Contract: EMPTY).")
+    else:
+        log(f"  ✓ {len(assets)} active assets validated. assets.json written (Contract: {a_status}).")
     write_json(data_dir / "assets.json", assets)
 
+    endpoints = []
     if not args.skip_endpoints:
         log("=== Phase 1b: Endpoint collection (gau) ===")
-        endpoints = collect_endpoints(scope, raw)
+        endpoints = collect_endpoints(scope, raw, fresh=args.fresh)
         write_json(data_dir / "endpoints.json", endpoints)
 
     if not args.skip_js:
@@ -332,15 +458,20 @@ def main() -> None:
         else:
             log("  application_model.json generated successfully")
 
+    run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
     meta = {
+        "run_id": run_id,
         "program": args.program,
+        "fresh_mode": args.fresh,
         "run_at": datetime.now().isoformat(timespec="seconds"),
         "tools": {t: tool_version(t) for t in TOOLS},
         "rate_limits": RATE_LIMIT,
         "asset_count": len(assets),
+        "endpoint_count": len(endpoints),
+        "status": "VALID" if len(assets) > 0 else "NO_LIVE_ASSETS",
     }
     write_json(data_dir / "run_meta.json", meta)
-    log("Done.")
+    log(f"Done. Run ID: {run_id}")
 
 
 if __name__ == "__main__":

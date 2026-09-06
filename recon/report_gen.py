@@ -152,7 +152,7 @@ def sanitize_curl(url: str, method: str = "GET", headers: dict | None = None, da
     return " \\\n    ".join(parts)
 
 
-def generate_markdown_report(program: str, finding: dict) -> tuple[str, Path]:
+def generate_markdown_report(program: str, finding: dict, is_sample: bool = False) -> tuple[str, Path]:
     """Generate HackerOne Markdown report and persist to evidence/reports/<program>/."""
     scope = load_scope(program)
     prog_meta = scope.get("program", {})
@@ -282,9 +282,19 @@ The server accepts the request and returns a responsive status (HTTP 200/30x) ex
 - **Reporter Note:** No destructive actions or data modification took place during verification.
 """
 
-    out_dir = EVIDENCE / program
+    out_dir = EVIDENCE / program if not is_sample else EVIDENCE / program / "sample"
     out_dir.mkdir(parents=True, exist_ok=True)
-    report_file = out_dir / f"H1_REPORT_{timestamp}_{tag}.md"
+    filename = f"H1_REPORT_{timestamp}_{tag}.md" if not is_sample else f"SAMPLE_H1_REPORT_{timestamp}_{tag}.md"
+    report_file = out_dir / filename
+
+    if is_sample:
+        sample_banner = (
+            "> [!NOTE]\n"
+            "> **SAMPLE TEST FIXTURE**: This report was generated using `--sample` for testing and schema verification.\n"
+            "> It does NOT represent a live verified finding.\n\n---\n\n"
+        )
+        md = sample_banner + md
+
     report_file.write_text(md, encoding="utf-8")
 
     return md, report_file
@@ -300,9 +310,10 @@ def _selfcheck() -> None:
         "score": 85,
         "notes": "config.json exposed with internal endpoints",
     }
-    md, path = generate_markdown_report("general", sample_finding)
+    md, path = generate_markdown_report("general", sample_finding, is_sample=True)
     assert "CWE-538" in md, "CWE mapping failed"
     assert "api.example.com" in md, "Host not included"
+    assert "SAMPLE TEST FIXTURE" in md, "Sample banner missing"
     assert path.exists(), "Report file was not persisted"
     path.unlink()  # Clean test file
     print("[report_gen] selfcheck OK: HackerOne report generation and formatting verified.")
@@ -329,7 +340,7 @@ def main() -> None:
             "score": 80,
             "notes": "Verified CORS reflection with Access-Control-Allow-Credentials: true",
         }
-        md, path = generate_markdown_report(args.program, finding)
+        md, path = generate_markdown_report(args.program, finding, is_sample=True)
         print(f"\n[report_gen] ✓ Sample report generated successfully:")
         print(f"  Path: {path}")
         print(f"  Size: {len(md)} bytes\n")

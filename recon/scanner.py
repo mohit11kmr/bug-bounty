@@ -20,6 +20,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -34,9 +35,9 @@ RECON = BASE / "recon"
 EVIDENCE = BASE / "evidence" / "scans"
 
 DEFAULT_EXCLUDE_TAGS = "dos,fuzz,brute-force,crlf,injection,rce,kev"  # "safe scanning" first pass
-DEFAULT_INCLUDE_TAGS = "exposure,config,misconfig,tech,cve,default-login"  # high-value, low-noise
-NUCLEI_SEVERITY = "low,medium,high,critical"
-NUCLEI_MAX_TIME = 900  # 15 min cap — full coverage per host at safe RPS (0 = no cap)
+DEFAULT_INCLUDE_TAGS = os.environ.get("NUCLEI_INCLUDE_TAGS", "exposure,config,misconfig,tech,cve,default-login")  # high-value, low-noise
+NUCLEI_SEVERITY = os.environ.get("NUCLEI_SEVERITY", "low,medium,high,critical")
+NUCLEI_MAX_TIME = int(os.environ.get("NUCLEI_MAX_TIME", "900"))  # 15 min cap — full coverage per host at safe RPS (0 = no cap)
 DEFAULT_RUN_ON = "live"  # "live" = 200/30x hosts only, "all" = har asset, "list:x,y" = explicit
 
 
@@ -78,11 +79,13 @@ def make_scope_filter(scope: dict):
 
     def in_scope(host: str) -> bool:
         host = host.lower().rstrip(".")
-        if host in roots:
+        bare = host.split(":")[0]
+        variants = [host] if host == bare else [host, bare]
+        if any(v in roots for v in variants):
             return True
-        if wildcard_match(host, excluded):
+        if any(wildcard_match(v, excluded) for v in variants):
             return False
-        return wildcard_match(host, roots)
+        return any(wildcard_match(v, roots) for v in variants)
 
     return in_scope
 
@@ -281,9 +284,13 @@ def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
         url TEXT, host TEXT, method TEXT,
         tag TEXT, score INTEGER, status TEXT DEFAULT 'TRIAGED',
         confidence REAL DEFAULT 0.0,
+        tool TEXT DEFAULT 'nuclei',
         notes TEXT DEFAULT '',
         created_at TEXT, updated_at TEXT,
         UNIQUE(url, tag));""")
+    cols = [c[1] for c in cur.execute("PRAGMA table_info(candidate_findings)").fetchall()]
+    if "tool" not in cols:
+        cur.execute("ALTER TABLE candidate_findings ADD COLUMN tool TEXT DEFAULT 'heuristic'")
     tag_map = {
         "cve": "vuln_cve", "misconfiguration": "vuln_misconfig",
         "exposure": "vuln_exposure", "tech": "tech_probe",
@@ -307,13 +314,14 @@ def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
         notes = f"nuclei: {title} ({sev})"
         conf = {"critical": 0.9, "high": 0.8, "medium": 0.65, "low": 0.5}.get(sev, 0.4)
         cur.execute(
-            "INSERT INTO candidate_findings (url,host,method,tag,score,status,confidence,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,'TRIAGED',?,?,?) "
+            "INSERT INTO candidate_findings (url,host,method,tag,score,status,confidence,tool,created_at,updated_at,notes) "
+            "VALUES (?,?,?,?,?,'TRIAGED',?,'nuclei',?,?,?) "
             "ON CONFLICT(url, tag) DO UPDATE SET "
             "score=MAX(score, excluded.score), confidence=MAX(confidence, excluded.confidence), "
+            "tool='nuclei', "
             "notes=CASE WHEN notes='' THEN ? ELSE notes || ' | ' || ? END, updated_at=excluded.updated_at",
             (url, host, "GET", tag, score, conf, date.today().isoformat(),
-             date.today().isoformat(), notes, notes))
+             date.today().isoformat(), notes, notes, notes))
         inserted += 1
     con.commit()
     con.close()

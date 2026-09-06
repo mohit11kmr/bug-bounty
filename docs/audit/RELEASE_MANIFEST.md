@@ -35,7 +35,7 @@
 ---
 
 ## Release Identification
-- **Release Commit:** PENDING_COMMIT
+- **Release Commit:** d1c780d4cdbc034b740bb51bc86e30d1226cae57
 - **Release Tag:** v2026.09.06
 - **Working Tree:** CLEAN
 - **Release Tests:** PASS
