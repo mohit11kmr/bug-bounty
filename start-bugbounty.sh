@@ -507,6 +507,76 @@ run_complete_hunt() {
 }
 
 # =============================================================================
+# ZERO-TOUCH AUTONOMOUS HUNT & AUTO-REPORT PIPELINE
+# Recon → JS Miner → Intelligence → Auto-Hunter → Report Gen → Push Notification
+# =============================================================================
+run_zero_touch_hunt() {
+  local target="$1"
+  clear
+  title_box " 🤖 AUTONOMOUS ZERO-TOUCH HUNT " "$target"
+  echo ""
+  echo "${P}  ${B}Target:${R} ${CYAN}${B}$target${R}"
+  echo "${P}  ${MUTED}Initiating 100% automated reconnaissance, candidate verification & report generation...${R}"
+  echo ""
+  sep
+
+  # Phase 1: Recon Pipeline
+  local t1_start=$(date +%s)
+  echo "${P}  ${B}${BLUE}◈ [Phase 1/5]${R} ⚡ ${B}Reconnaissance & Asset Probing...${R}"
+  python3 "$WS/recon/recon_pipeline.py" --program "$target"
+  local t1_dur=$(( $(date +%s) - t1_start ))
+  echo "${P}    ${GREEN}✓ Recon complete in ${t1_dur}s.${R}"
+  echo ""
+
+  # Phase 2: Deep JS Miner & Secret Extraction
+  local t2_start=$(date +%s)
+  echo "${P}  ${B}${BLUE}◈ [Phase 2/5]${R} ⚡ ${B}Client-side JS-Mining & Route Extraction...${R}"
+  python3 "$WS/recon/js_miner.py" --program "$target"
+  local t2_dur=$(( $(date +%s) - t2_start ))
+  echo "${P}    ${GREEN}✓ JS Miner complete in ${t2_dur}s.${R}"
+  echo ""
+
+  # Phase 3: Intelligence Triage & Scoring
+  local t3_start=$(date +%s)
+  echo "${P}  ${B}${BLUE}◈ [Phase 3/5]${R} ⚡ ${B}Prioritization & Heuristic Scoring...${R}"
+  python3 "$WS/recon/intelligence.py" --program "$target" --top 40
+  local t3_dur=$(( $(date +%s) - t3_start ))
+  echo "${P}    ${GREEN}✓ Intelligence triage complete in ${t3_dur}s.${R}"
+  echo ""
+
+  # Phase 4: Headless Candidate Prober & Verification
+  local t4_start=$(date +%s)
+  echo "${P}  ${B}${BLUE}◈ [Phase 4/5]${R} ⚡ ${B}Headless Candidate Verification (CORS/Auth/Leaks)...${R}"
+  python3 "$WS/recon/auto_hunter.py" --program "$target" --min-score 50
+  local t4_dur=$(( $(date +%s) - t4_start ))
+  echo "${P}    ${GREEN}✓ Candidate verification complete in ${t4_dur}s.${R}"
+  echo ""
+
+  # Phase 5: Check Reports & Dispatch Notifications
+  echo "${P}  ${B}${BLUE}◈ [Phase 5/5]${R} ⚡ ${B}Report Compilation & Alert Dispatch...${R}"
+  local rep_dir="$WS/evidence/reports/$target"
+  local count=0
+  if [ -d "$rep_dir" ]; then
+    count=$(find "$rep_dir" -maxdepth 1 -name "H1_REPORT_*.md" | wc -l)
+  fi
+
+  python3 "$WS/recon/notify.py" \
+    --title "🎯 Autonomous Zero-Touch Hunt Finished ($target)" \
+    --message "Autonomous hunt completed successfully across 5 phases.\nVerified Reports generated: $count\nReports Directory: evidence/reports/$target/" \
+    --severity "info"
+
+  echo ""
+  sep
+  echo "${P}  ${B}${GREEN}✓ ZERO-TOUCH HUNT COMPLETE:${R} $count ready-to-submit HackerOne draft reports generated!"
+  if [ "$count" -gt 0 ]; then
+    echo "${P}  ${B}Reports Directory:${R} ${CYAN}$rep_dir/${R}"
+  fi
+  echo ""
+  sep
+  read -r -p "${P}  Press Enter or [0] to return... " _
+}
+
+# =============================================================================
 # Target Action Sub-Menu
 # =============================================================================
 target_menu() {
@@ -521,7 +591,8 @@ target_menu() {
     echo ""
     sep
     echo "${P}  ${B}Recommended Actions:${R}"
-    opt "C" "🚀 COMPLETE AUTONOMOUS SCAN & HUNT" "Recon → JS Miner → Triage → Pre-filled AI Agent"
+    opt "A" "🤖 AUTONOMOUS ZERO-TOUCH HUNT"      "Recon → JS → Triage → Verify → Draft Report"
+    opt "C" "🚀 Complete Scan & OpenCode Prompt" "Standard workflow with AI agent prompt"
     echo ""
     echo "${P}  ${B}Individual Pipeline Modules:${R}"
     opt "1" "Interactive Shell / Session"        "Terminal hunting session"
@@ -535,9 +606,12 @@ target_menu() {
     echo ""
     sep
     local act
-    read -r -p "${P}  ${B}Action for [$target]${R} [C/0-7, or B to return]: " act
+    read -r -p "${P}  ${B}Action for [$target]${R} [A/C/0-7, or B to return]: " act
 
     case "$act" in
+      [aA]*)
+        run_zero_touch_hunt "$target"
+        ;;
       [cC]*)
         run_complete_hunt "$target"
         ;;
@@ -949,6 +1023,62 @@ splash() {
 }
 
 # =============================================================================
+# Continuous Recon Daemon Menu
+# =============================================================================
+daemon_menu() {
+  while true; do
+    update_geom
+    clear
+    title_box " 🔄 CONTINUOUS RECON DAEMON " "Delta Watcher & Background Monitor"
+    echo ""
+    echo "${P}  Status: $(python3 "$WS/recon/daemon.py" --status)"
+    echo ""
+    sep
+    opt "1" "Run Single Delta Cycle (Immediate)" "Check for new assets once and exit"
+    opt "2" "Start Daemon Loop (1 hour interval)" "Continuously monitors in background"
+    opt "3" "Stop Running Daemon"                "Terminate background monitor process"
+    opt "0" "↩ Return to Main Menu"              "Back to Mission Control"
+    echo ""
+    sep
+    local dc
+    read -r -p "${P}  Choice [0-3, or B to return]: " dc
+    case "$dc" in
+      1)
+        echo ""
+        read -r -p "${P}  Target handle [default: wordpress]: " dt
+        [ -z "$dt" ] && dt="wordpress"
+        python3 "$WS/recon/daemon.py" --program "$dt" --once
+        echo ""
+        sep
+        read -r -p "${P}  Press Enter to continue..." _
+        ;;
+      2)
+        echo ""
+        read -r -p "${P}  Target handle [default: wordpress]: " dt
+        [ -z "$dt" ] && dt="wordpress"
+        read -r -p "${P}  Interval in seconds [default: 3600]: " dsec
+        [ -z "$dsec" ] && dsec=3600
+        nohup python3 "$WS/recon/daemon.py" --program "$dt" --interval "$dsec" > "$WS/recon/data/daemon.log" 2>&1 &
+        sleep 1
+        echo "${P}  ${GREEN}✓ Daemon launched in background.${R}"
+        python3 "$WS/recon/daemon.py" --status
+        sleep 2
+        ;;
+      3)
+        echo ""
+        python3 "$WS/recon/daemon.py" --stop
+        sleep 1
+        ;;
+      0|[bB]*)
+        return
+        ;;
+      *)
+        ;;
+    esac
+  done
+}
+
+# =============================================================================
 # Main Menu
 # =============================================================================
 main_menu() {
@@ -959,6 +1089,7 @@ main_menu() {
     echo ""
     echo "${P}  ${B}Mission Actions:${R}"
     opt "N" "⚡ Start NEW Scan"          "discover new HackerOne targets (Cash Bounty / All)"
+    opt "M" "🔄 Continuous Recon Daemon" "background delta watcher & automated alerting"
     opt "D" "🔍 System Diagnostics"      "tools, APIs, Docker & environment audit"
     opt "Q" "🚪 Quit"                    "exit mission control"
     echo ""
@@ -979,10 +1110,11 @@ main_menu() {
     echo ""
     sep
     local choice
-    read -r -p "${P}  ${B}Select Target [1-$n] or Action [N/D/Q]:${R} " choice
+    read -r -p "${P}  ${B}Select Target [1-$n] or Action [N/M/D/Q]:${R} " choice
 
     case "$choice" in
       [nN]*) new_scan ;;
+      [mM]*) daemon_menu ;;
       [dD]*) diagnostics_check ;;
       [qQ]*) echo "${P}  Happy hunting. Bye!"; exit 0 ;;
       *)
@@ -998,6 +1130,15 @@ main_menu() {
 }
 
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  if [ "${1:-}" = "--auto" ] && [ -n "${2:-}" ]; then
+    run_zero_touch_hunt "$2"
+    exit 0
+  fi
+  if [ "${1:-}" = "--daemon" ]; then
+    shift
+    python3 "$WS/recon/daemon.py" "$@"
+    exit 0
+  fi
   splash
   main_menu
 fi
