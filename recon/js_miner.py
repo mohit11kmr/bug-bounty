@@ -23,6 +23,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
@@ -31,6 +32,8 @@ import yaml
 
 BASE = Path(__file__).resolve().parent.parent
 RECON = BASE / "recon"
+sys.path.insert(0, str(RECON))
+from scope_utils import load_scope_file, make_scope_filter  # noqa: E402
 
 # Regex patterns for static JS analysis
 ROUTE_PATTERNS = [
@@ -98,51 +101,12 @@ def extract_from_js_content(text: str, base_url: str = "") -> tuple[list[str], l
 
 
 def load_scope(program: str) -> dict:
-    import re
     scope_file = BASE / program / "scope.yaml"
-    if not scope_file.exists():
-        sys.exit(f"[js_miner] ERROR: {scope_file} nahi mila — pehle scope.yaml banao")
-    raw = scope_file.read_text(encoding="utf-8")
-    try:
-        return yaml.safe_load(raw)
-    except Exception:
-        fixed_lines = []
-        for line in raw.splitlines():
-            if re.match(r'^\s*-\s*[\*\?].*', line):
-                prefix = line[:line.index('-') + 2]
-                val = line.strip()[1:].strip().strip('"').strip("'")
-                fixed_lines.append(f'{prefix}"{val}"')
-            else:
-                fixed_lines.append(line)
-        return yaml.safe_load("\n".join(fixed_lines))
+    return load_scope_file(scope_file, required=True,
+                            not_found_msg=f"[js_miner] ERROR: {scope_file} nahi mila — pehle scope.yaml banao")
 
 
-def make_scope_filter(scope: dict):
-    roots = [str(r).lower() for r in scope.get("roots", [])]
-    excluded = [str(x).lower() for x in scope.get("excluded", [])]
-
-    def wildcard_match(host: str, patterns: list) -> bool:
-        host = host.lower().rstrip(".")
-        for p in patterns:
-            if p.startswith("*."):
-                base = p[2:]
-                if host == base or host.endswith("." + base):
-                    return True
-            elif p == host:
-                return True
-        return False
-
-    def in_scope(host: str) -> bool:
-        host = host.lower().rstrip(".")
-        bare = host.split(":")[0]
-        variants = [host] if host == bare else [host, bare]
-        if any(v in roots for v in variants):
-            return True
-        if any(wildcard_match(v, excluded) for v in variants):
-            return False
-        return any(wildcard_match(v, roots) for v in variants)
-
-    return in_scope
+# make_scope_filter: shared single source of truth, see scope_utils.py.
 
 
 def rate_limits(scope: dict) -> tuple[int, int]:
@@ -239,6 +203,8 @@ def merge_into_database(program: str, new_endpoints: list[str], secrets: list[di
     data_dir.mkdir(parents=True, exist_ok=True)
     db_path = data_dir / "recon.db"
     now = date.today().isoformat()
+    # This crawl's own id — stamps every endpoint newly discovered by this run.
+    run_id = f"run_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 
     # 1. Update endpoints.json
     ep_file = data_dir / "endpoints.json"
@@ -262,7 +228,8 @@ def merge_into_database(program: str, new_endpoints: list[str], secrets: list[di
                 "source": ["katana", "js_crawl"],
                 "auth_hint": "unknown",
                 "first_seen": now,
-                "last_seen": now
+                "last_seen": now,
+                "run_id": run_id,
             })
             added_count += 1
 
@@ -273,13 +240,16 @@ def merge_into_database(program: str, new_endpoints: list[str], secrets: list[di
     if db_path.exists():
         con = sqlite3.connect(db_path)
         cur = con.cursor()
+        cols = [c[1] for c in cur.execute("PRAGMA table_info(endpoints)").fetchall()]
+        if cols and "run_id" not in cols:
+            cur.execute("ALTER TABLE endpoints ADD COLUMN run_id TEXT DEFAULT 'legacy'")
         for u in new_endpoints:
             parsed = urlparse(u)
             host = parsed.netloc.split(":")[0].lower() if parsed.netloc else "?"
             cur.execute("""INSERT OR IGNORE INTO endpoints
-                (url, host, method, source, auth_hint, score, tag, first_seen, last_seen)
-                VALUES (?, ?, 'GET', 'katana,js_crawl', 'unknown', 50, 'api_surface', ?, ?)""",
-                (u, host, now, now))
+                (url, host, method, source, auth_hint, score, tag, first_seen, last_seen, run_id)
+                VALUES (?, ?, 'GET', 'katana,js_crawl', 'unknown', 50, 'api_surface', ?, ?, ?)""",
+                (u, host, now, now, run_id))
         con.commit()
         con.close()
         print(f"[js_miner] SQLite recon.db endpoints table synced.")

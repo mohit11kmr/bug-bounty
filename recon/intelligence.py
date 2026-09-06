@@ -16,7 +16,8 @@ import argparse
 import json
 import re
 import sqlite3
-from datetime import date
+import uuid
+from datetime import date, datetime
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent  # bug-bounty/
@@ -97,12 +98,14 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS assets (
     host TEXT PRIMARY KEY,
     url TEXT, ip TEXT, status INTEGER, title TEXT,
-    technologies TEXT, source TEXT, first_seen TEXT, last_seen TEXT
+    technologies TEXT, source TEXT, first_seen TEXT, last_seen TEXT,
+    run_id TEXT DEFAULT 'legacy'
 );
 CREATE TABLE IF NOT EXISTS endpoints (
     url TEXT PRIMARY KEY,
     host TEXT, method TEXT, source TEXT, auth_hint TEXT,
-    score INTEGER, tag TEXT, first_seen TEXT, last_seen TEXT
+    score INTEGER, tag TEXT, first_seen TEXT, last_seen TEXT,
+    run_id TEXT DEFAULT 'legacy'
 );
 CREATE TABLE IF NOT EXISTS candidate_findings (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -110,6 +113,7 @@ CREATE TABLE IF NOT EXISTS candidate_findings (
     tag TEXT, score INTEGER, status TEXT DEFAULT 'triage',  -- triage|valid|invalid|duplicate
     confidence REAL DEFAULT 0.0,
     tool TEXT DEFAULT 'heuristic',
+    run_id TEXT DEFAULT 'legacy',
     notes TEXT DEFAULT '',
     created_at TEXT, updated_at TEXT,
     UNIQUE(url, tag)
@@ -117,6 +121,21 @@ CREATE TABLE IF NOT EXISTS candidate_findings (
 CREATE INDEX IF NOT EXISTS idx_endpoints_score ON endpoints(score DESC);
 CREATE INDEX IF NOT EXISTS idx_cands_status ON candidate_findings(status);
 """
+
+# run_id columns added post-release (PIPELINE_INTEGRITY_V2). ALTER-migrate any DB created
+# by an older schema version so historical rows are explicitly tagged 'legacy', never NULL-by-accident.
+_RUN_ID_MIGRATIONS = (
+    ("assets", "run_id TEXT DEFAULT 'legacy'"),
+    ("endpoints", "run_id TEXT DEFAULT 'legacy'"),
+    ("candidate_findings", "run_id TEXT DEFAULT 'legacy'"),
+)
+
+
+def migrate_run_id_columns(cur: sqlite3.Cursor) -> None:
+    for table, coldef in _RUN_ID_MIGRATIONS:
+        cols = [c[1] for c in cur.execute(f"PRAGMA table_info({table})").fetchall()]
+        if cols and "run_id" not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
 
 
 def write_candidate_report(program: str, data_dir: Path, con: sqlite3.Connection, limit: int = 25) -> None:
@@ -174,6 +193,10 @@ def main() -> None:
         _selfcheck()
         return
 
+    # Generated up front (not just before the DB write) so a clean, actionable error
+    # message can cite it even if this run fails before reaching persistence.
+    intel_run_id = f"run_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
+
     data_dir = RECON / "data" / args.program
     data_dir.mkdir(parents=True, exist_ok=True)
     assets_file = data_dir / "assets.json"
@@ -195,11 +218,31 @@ def main() -> None:
         else:
             raise SystemExit(f"ERROR: {assets_file} nahi mila — pehle recon_pipeline chalao")
     else:
-        assets = json.loads(assets_file.read_text())
+        try:
+            assets = json.loads(assets_file.read_text())
+        except json.JSONDecodeError as e:
+            raise SystemExit(
+                f"ERROR: assets.json is malformed\n"
+                f"Program: {args.program}\n"
+                f"Artifact: {assets_file}\n"
+                f"Run ID: {intel_run_id}\n"
+                f"Detail: {e}\n"
+                f"Recovery: run recon_pipeline.py --program {args.program} --fresh"
+            )
 
     ep_file = data_dir / "endpoints.json"
     if ep_file.exists():
-        endpoints = json.loads(ep_file.read_text())
+        try:
+            endpoints = json.loads(ep_file.read_text())
+        except json.JSONDecodeError as e:
+            raise SystemExit(
+                f"ERROR: endpoints.json is malformed\n"
+                f"Program: {args.program}\n"
+                f"Artifact: {ep_file}\n"
+                f"Run ID: {intel_run_id}\n"
+                f"Detail: {e}\n"
+                f"Recovery: run recon_pipeline.py --program {args.program} --fresh"
+            )
     else:
         print(f"[intel] endpoints.json nahi mila — fallback: assets.json ke URLs use kar rahe hain")
         endpoints = [{"url": a["url"], "method": "GET", "source": ["assets"], "auth_hint": "unknown",
@@ -235,24 +278,33 @@ def main() -> None:
     con = sqlite3.connect(db_path)
     cur = con.cursor()
     cur.executescript(SCHEMA)
+    migrate_run_id_columns(cur)
     cols = [c[1] for c in cur.execute("PRAGMA table_info(candidate_findings)").fetchall()]
     if "tool" not in cols:
         cur.execute("ALTER TABLE candidate_findings ADD COLUMN tool TEXT DEFAULT 'heuristic'")
+
+    # intel_run_id (generated at the top of main()) stamps every candidate_findings row
+    # this pass touches. Assets/endpoints rows instead carry the run_id of the
+    # recon_pipeline.py/js_miner.py run that actually *discovered* them (read from each
+    # record's own "run_id" field, defaulting to 'legacy' for pre-run-ownership records)
+    # — intelligence.py re-projects that discovery data into SQLite, it doesn't originate it.
 
     cur.execute("DELETE FROM assets")
     cur.execute("DELETE FROM endpoints")
     now = date.today().isoformat()
     for a in assets:
         cur.execute(
-            "INSERT OR REPLACE INTO assets VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO assets VALUES (?,?,?,?,?,?,?,?,?,?)",
             (a["host"], a.get("url",""), a.get("ip",""), a.get("status"),
              a.get("title",""), ",".join(a.get("technologies",[])),
-             ",".join(a.get("source",[])), a.get("first_seen"), a.get("last_seen")))
+             ",".join(a.get("source",[])), a.get("first_seen"), a.get("last_seen"),
+             a.get("run_id", "legacy")))
     for x in scored:
         cur.execute(
-            "INSERT OR REPLACE INTO endpoints VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO endpoints VALUES (?,?,?,?,?,?,?,?,?,?)",
             (x["url"], x["host"], x["method"], ",".join(x["source"]),
-             x["auth_hint"], x["score"], x["tag"], x["first_seen"], x["last_seen"]))
+             x["auth_hint"], x["score"], x["tag"], x["first_seen"], x["last_seen"],
+             x.get("run_id", "legacy")))
     # candidate queue refresh: sirf endpoint-scored triage rows refresh karo.
     # Scanner findings (vuln_* tags, tech_probe) aur validated rows (VERIFIED/REJECTED/VALIDATING)
     # PRESERVE karo — intelligence.py ka kaam koi nuclear wipe nahi.
@@ -266,10 +318,10 @@ def main() -> None:
             seen.add((x["url"], x["tag"]))
             cur.execute(
                 "INSERT INTO candidate_findings "
-                "(url,host,method,tag,score,status,confidence,tool,notes,created_at,updated_at) "
-                "VALUES (?,?,?,?,?,'TRIAGED',0.5,'intelligence','Discovered via heuristic surface analysis',?,?) "
+                "(url,host,method,tag,score,status,confidence,tool,run_id,notes,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,'TRIAGED',0.5,'intelligence',?,'Discovered via heuristic surface analysis',?,?) "
                 "ON CONFLICT(url, tag) DO NOTHING",
-                (x["url"], x["host"], x["method"], x["tag"], x["score"], now, now))
+                (x["url"], x["host"], x["method"], x["tag"], x["score"], intel_run_id, now, now))
     con.commit()
 
     top = scored[:args.top]

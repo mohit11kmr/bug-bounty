@@ -318,6 +318,13 @@ diagnostics_check() {
 
 # =============================================================================
 # Recon Diff Engine
+#
+# STATUS: DISPLAY / INVESTIGATION TOOL ONLY (PIPELINE_INTEGRITY_V2 audit).
+# Runs a passive subfinder pass and prints new-vs-known subdomains to the terminal.
+# It does NOT write to assets.json or recon.db and does NOT feed scanner.py/
+# intelligence.py/daemon.py — it is not a persistence or auto-discovery mechanism.
+# To actually add newly-seen subdomains to the pipeline, re-run recon_pipeline.py
+# (optionally --fresh).
 # =============================================================================
 target_diff() {
   local target="$1"

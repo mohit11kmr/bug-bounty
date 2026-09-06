@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import urllib.parse
+import uuid
 from datetime import date, datetime
 from pathlib import Path
 
@@ -33,6 +34,8 @@ import yaml
 BASE = Path(__file__).resolve().parent.parent          # bug-bounty/
 RECON = BASE / "recon"
 EVIDENCE = BASE / "evidence" / "scans"
+sys.path.insert(0, str(RECON))
+from scope_utils import load_scope_file, make_scope_filter  # noqa: E402
 
 DEFAULT_EXCLUDE_TAGS = "dos,fuzz,brute-force,crlf,injection,rce,kev"  # "safe scanning" first pass
 DEFAULT_INCLUDE_TAGS = os.environ.get("NUCLEI_INCLUDE_TAGS", "exposure,config,misconfig,tech,cve,default-login")  # high-value, low-noise
@@ -42,52 +45,12 @@ DEFAULT_RUN_ON = "live"  # "live" = 200/30x hosts only, "all" = har asset, "list
 
 
 def load_scope(program: str) -> dict:
-    import re
     scope_file = BASE / program / "scope.yaml"
-    if not scope_file.exists():
-        sys.exit(f"[scanner] scope.yaml nahi mila: {scope_file}")
-    raw = scope_file.read_text(encoding="utf-8")
-    try:
-        return yaml.safe_load(raw) or {}
-    except Exception:
-        fixed_lines = []
-        for line in raw.splitlines():
-            if re.match(r'^\s*-\s*[\*\?].*', line):
-                prefix = line[:line.index('-') + 2]
-                val = line.strip()[1:].strip().strip('"').strip("'")
-                fixed_lines.append(f'{prefix}"{val}"')
-            else:
-                fixed_lines.append(line)
-        return yaml.safe_load("\n".join(fixed_lines)) or {}
+    return load_scope_file(scope_file, required=True,
+                            not_found_msg=f"[scanner] scope.yaml nahi mila: {scope_file}")
 
 
-def make_scope_filter(scope: dict):
-    """Return fn(host) -> bool. In-scope = root match AND not excluded (wildcard aware)."""
-    roots = [str(r).lower() for r in scope.get("roots", [])]
-    excluded = [str(x).lower() for x in scope.get("excluded", [])]
-
-    def wildcard_match(host: str, patterns: list) -> bool:
-        host = host.lower().rstrip(".")
-        for p in patterns:
-            if p.startswith("*."):
-                base = p[2:]
-                if host == base or host.endswith("." + base):
-                    return True
-            elif p == host:
-                return True
-        return False
-
-    def in_scope(host: str) -> bool:
-        host = host.lower().rstrip(".")
-        bare = host.split(":")[0]
-        variants = [host] if host == bare else [host, bare]
-        if any(v in roots for v in variants):
-            return True
-        if any(wildcard_match(v, excluded) for v in variants):
-            return False
-        return any(wildcard_match(v, roots) for v in variants)
-
-    return in_scope
+# make_scope_filter: shared single source of truth, see scope_utils.py.
 
 
 def collect_scan_targets(program: str, scope: dict) -> list[str]:
@@ -285,12 +248,17 @@ def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
         tag TEXT, score INTEGER, status TEXT DEFAULT 'TRIAGED',
         confidence REAL DEFAULT 0.0,
         tool TEXT DEFAULT 'nuclei',
+        run_id TEXT DEFAULT 'legacy',
         notes TEXT DEFAULT '',
         created_at TEXT, updated_at TEXT,
         UNIQUE(url, tag));""")
     cols = [c[1] for c in cur.execute("PRAGMA table_info(candidate_findings)").fetchall()]
     if "tool" not in cols:
         cur.execute("ALTER TABLE candidate_findings ADD COLUMN tool TEXT DEFAULT 'heuristic'")
+    if "run_id" not in cols:
+        cur.execute("ALTER TABLE candidate_findings ADD COLUMN run_id TEXT DEFAULT 'legacy'")
+    # This scan invocation's own id — stamps every candidate_findings row this pass touches.
+    scan_run_id = f"run_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
     tag_map = {
         "cve": "vuln_cve", "misconfiguration": "vuln_misconfig",
         "exposure": "vuln_exposure", "tech": "tech_probe",
@@ -314,13 +282,13 @@ def import_nuclei_findings(out_jsonl: Path, program: str) -> None:
         notes = f"nuclei: {title} ({sev})"
         conf = {"critical": 0.9, "high": 0.8, "medium": 0.65, "low": 0.5}.get(sev, 0.4)
         cur.execute(
-            "INSERT INTO candidate_findings (url,host,method,tag,score,status,confidence,tool,created_at,updated_at,notes) "
-            "VALUES (?,?,?,?,?,'TRIAGED',?,'nuclei',?,?,?) "
+            "INSERT INTO candidate_findings (url,host,method,tag,score,status,confidence,tool,run_id,created_at,updated_at,notes) "
+            "VALUES (?,?,?,?,?,'TRIAGED',?,'nuclei',?,?,?,?) "
             "ON CONFLICT(url, tag) DO UPDATE SET "
             "score=MAX(score, excluded.score), confidence=MAX(confidence, excluded.confidence), "
-            "tool='nuclei', "
+            "tool='nuclei', run_id=excluded.run_id, "
             "notes=CASE WHEN notes='' THEN ? ELSE notes || ' | ' || ? END, updated_at=excluded.updated_at",
-            (url, host, "GET", tag, score, conf, date.today().isoformat(),
+            (url, host, "GET", tag, score, conf, scan_run_id, date.today().isoformat(),
              date.today().isoformat(), notes, notes, notes))
         inserted += 1
     con.commit()

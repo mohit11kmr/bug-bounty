@@ -23,6 +23,9 @@ from typing import Tuple, List, Dict, Any
 
 BASE = Path(__file__).resolve().parent.parent  # bug-bounty/
 RECON = BASE / "recon"
+sys.path.insert(0, str(RECON))
+from scope_utils import load_scope_file, make_scope_filter  # noqa: E402
+
 RATE_LIMIT = {"concurrency": 5, "delay": "800ms"}  # WAF-safe default, scope.yaml override
 
 TOOLS = ["subfinder", "dnsx", "httpx", "gau"]
@@ -60,23 +63,11 @@ def check_tools(skip_endpoints: bool = False) -> None:
 
 
 def load_scope(program_dir: Path) -> dict:
-    import yaml, re
     scope_file = program_dir / "scope.yaml"
-    if not scope_file.exists():
-        sys.exit(f"ERROR: {scope_file} not found — pehle scope.yaml banao")
-    raw = scope_file.read_text(encoding="utf-8")
-    try:
-        return yaml.safe_load(raw)
-    except Exception:
-        fixed_lines = []
-        for line in raw.splitlines():
-            if re.match(r'^\s*-\s*[\*\?].*', line):
-                prefix = line[:line.index('-') + 2]
-                val = line.strip()[1:].strip().strip('"').strip("'")
-                fixed_lines.append(f'{prefix}"{val}"')
-            else:
-                fixed_lines.append(line)
-        return yaml.safe_load("\n".join(fixed_lines))
+    return load_scope_file(
+        scope_file, required=True,
+        not_found_msg=f"ERROR: {scope_file} not found — pehle scope.yaml banao",
+    )
 
 
 def run(cmd: list, out: Path) -> None:
@@ -89,39 +80,7 @@ def run(cmd: list, out: Path) -> None:
             subprocess.run(cmd, stdout=f, stderr=subprocess.DEVNULL, check=False)
 
 
-def make_scope_filter(scope: dict):
-    """Return fn(host) -> bool. In-scope = root match AND not excluded (wildcard aware)."""
-    roots = [str(r).lower() for r in (scope.get("roots") or [])]
-    excluded = [str(x).lower() for x in (scope.get("excluded") or [])]
-
-    def wildcard_match(host: str, patterns: list) -> bool:
-        host = host.lower().rstrip(".")
-        for p in patterns:
-            if p.startswith("*."):
-                # *.example.com matches sub.example.com + example.com
-                base = p[2:]
-                if host == base or host.endswith("." + base):
-                    return True
-            elif p == host:
-                return True
-        return False
-
-    def in_scope(host: str) -> bool:
-        host = host.lower().rstrip(".")
-        bare = host.split(":")[0]
-        # Non-standard-port targets are recorded in scope.yaml/assets as "host:port";
-        # callers sometimes pass the bare host (port stripped from a URL netloc) —
-        # check both forms so a real host:port root isn't falsely reported out-of-scope.
-        variants = [host] if host == bare else [host, bare]
-        # 1) Explicit root match — hamesha in-scope (wildcard exclusions "barring" ko respect karo)
-        if any(v in roots for v in variants):
-            return True
-        # 2) Exclusion match — out-of-scope (wildcard included)
-        if any(wildcard_match(v, excluded) for v in variants):
-            return False
-        # 3) Root subdomain match — in-scope
-        return any(wildcard_match(v, roots) for v in variants)
-    return in_scope
+# load_scope_file/make_scope_filter: shared single source of truth, see scope_utils.py.
 
 
 def validate_jsonl_output(path: Path) -> Tuple[str, List[dict]]:
@@ -173,7 +132,7 @@ def validate_assets_list(assets: list) -> Tuple[str, List[dict]]:
     return "PARTIAL", valid
 
 
-def collect_assets(scope: dict, raw: Path, fresh: bool = False) -> list:
+def collect_assets(scope: dict, raw: Path, fresh: bool = False, run_id: str = "legacy") -> list:
     """Asset[] — guide §8: host, ip, status, title, tech, source, first_seen, last_seen."""
     is_in_scope = make_scope_filter(scope)
     roots = [str(r) for r in (scope.get("roots") or [])]
@@ -297,11 +256,12 @@ def collect_assets(scope: dict, raw: Path, fresh: bool = False) -> list:
             "source": ["subfinder", "httpx"],
             "first_seen": now,
             "last_seen": now,
+            "run_id": run_id,
         })
     return assets
 
 
-def collect_endpoints(scope: dict, raw: Path, fresh: bool = False) -> list:
+def collect_endpoints(scope: dict, raw: Path, fresh: bool = False, run_id: str = "legacy") -> list:
     """Endpoint[] — guide §8: url, method, source, auth_hint. Out-of-scope URLs dropped."""
     is_in_scope = make_scope_filter(scope)
     gau_out = raw / "gau.txt"
@@ -345,7 +305,7 @@ def collect_endpoints(scope: dict, raw: Path, fresh: bool = False) -> list:
     now = date.today().isoformat()
     endpoints = sorted(
         ({"url": u, "method": "GET", "source": ["gau"], "auth_hint": "unknown",
-          "first_seen": now, "last_seen": now} for u in urls),
+          "first_seen": now, "last_seen": now, "run_id": run_id} for u in urls),
         key=lambda e: e["url"],
     )
     return endpoints
@@ -424,11 +384,15 @@ def main() -> None:
     raw = data_dir / "raw"
     raw.mkdir(parents=True, exist_ok=True)
 
+    # Generated up front so every artifact this run produces (assets.json/endpoints.json
+    # records, run_meta.json) shares one id — the basis for stale-artifact detection.
+    run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
     roots = scope.get("roots") or []
     excluded = scope.get("excluded") or []
-    log(f"program={args.program} | roots={len(roots)} | excluded={len(excluded)} | fresh={args.fresh}")
+    log(f"program={args.program} | roots={len(roots)} | excluded={len(excluded)} | fresh={args.fresh} | run_id={run_id}")
     log("=== Phase 1: Asset discovery ===")
-    assets = collect_assets(scope, raw, fresh=args.fresh)
+    assets = collect_assets(scope, raw, fresh=args.fresh, run_id=run_id)
     a_status, valid_assets = validate_assets_list(assets)
     if a_status == "EMPTY":
         log("  ⚠ 0 active web assets found. assets.json written as [] (Contract: EMPTY).")
@@ -439,7 +403,7 @@ def main() -> None:
     endpoints = []
     if not args.skip_endpoints:
         log("=== Phase 1b: Endpoint collection (gau) ===")
-        endpoints = collect_endpoints(scope, raw, fresh=args.fresh)
+        endpoints = collect_endpoints(scope, raw, fresh=args.fresh, run_id=run_id)
         write_json(data_dir / "endpoints.json", endpoints)
 
     if not args.skip_js:
@@ -458,12 +422,12 @@ def main() -> None:
         else:
             log("  application_model.json generated successfully")
 
-    run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    run_at = datetime.now().isoformat(timespec="seconds")
     meta = {
         "run_id": run_id,
         "program": args.program,
         "fresh_mode": args.fresh,
-        "run_at": datetime.now().isoformat(timespec="seconds"),
+        "run_at": run_at,
         "tools": {t: tool_version(t) for t in TOOLS},
         "rate_limits": RATE_LIMIT,
         "asset_count": len(assets),

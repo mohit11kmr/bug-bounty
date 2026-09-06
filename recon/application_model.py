@@ -16,6 +16,15 @@ Human can then edit application_model.json to refine the object/ownership graph
 (through `manual://` markers). The file is the bridge between "URLs collected" and
 "app understood" — the missing layer the hypothesis engine consumes.
 
+STATUS (PIPELINE_INTEGRITY_V2 audit): CONNECTED, but not to the deterministic Python
+pipeline (intelligence.py/auto_hunter.py/scanner.py never parse this file — they don't
+need to, their own scoring is independent). It is consumed by the `prob-hunter`
+OpenCode agent (~/.config/opencode/agents/prob-hunter.md, invoked manually as
+`@prob-hunter`, see WORKFLOW.md §6) as a secondary input alongside candidate_report.md
+for actor/object ownership priors (BOLA/IDOR scoring). It is regenerated automatically
+here and in js_miner.py whenever endpoints.json exists — invoking @prob-hunter is a
+separate, human-triggered step, not something the default OpenCode handoff does itself.
+
 Self-check: python3 recon/application_model.py --selfcheck
 """
 

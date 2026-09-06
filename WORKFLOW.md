@@ -89,6 +89,10 @@ ELSE move to scan
 
 ### Chain B — fast bb-hunt (quick look, single command)
 
+> **STATUS: OPTIONAL** (PIPELINE_INTEGRITY_V2 audit) — an external, standalone script
+> (`~/.local/bin/bb-hunt`), not part of `start-bugbounty.sh` or `recon/*.py`. Intentionally
+> outside the tracked pipeline; not a phantom stage of it.
+
 ```bash
 bb-hunt <domain>            # subfinder → httpx → ffuf → nuclei
 bb-hunt <domain> --probe    # subs + alive only
@@ -121,6 +125,11 @@ ELSE manual per finding
 ```
 
 ## 4.5 SECRETS — trufflehog (exposed credentials, cheap win)
+
+> **STATUS: OPTIONAL** (PIPELINE_INTEGRITY_V2 audit) — a manual CLI step the human runs
+> themselves; not installed as a dependency and never invoked by `recon/*.py` or
+> `start-bugbounty.sh`. Intentionally outside the automated pipeline, not a phantom stage
+> of it.
 
 ```bash
 trufflehog filesystem <target-dir> --only-verified --no-update

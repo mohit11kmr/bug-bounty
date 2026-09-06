@@ -33,6 +33,8 @@ import yaml
 
 BASE = Path(__file__).resolve().parent.parent
 RECON = BASE / "recon"
+sys.path.insert(0, str(RECON))
+from scope_utils import load_scope_file, make_scope_filter  # noqa: E402
 PID_FILE = RECON / "data" / ".daemon.pid"
 
 # Lazy-load sibling modules
@@ -45,50 +47,10 @@ except ImportError:
 
 def load_scope(program: str) -> dict:
     scope_file = BASE / program / "scope.yaml"
-    if not scope_file.exists():
-        return {}
-    raw = scope_file.read_text(encoding="utf-8")
-    try:
-        return yaml.safe_load(raw) or {}
-    except Exception:
-        import re
-        fixed_lines = []
-        for line in raw.splitlines():
-            if re.match(r'^\s*-\s*[\*\?].*', line):
-                prefix = line[:line.index('-') + 2]
-                val = line.strip()[1:].strip().strip('"').strip("'")
-                fixed_lines.append(f'{prefix}"{val}"')
-            else:
-                fixed_lines.append(line)
-        return yaml.safe_load("\n".join(fixed_lines)) or {}
+    return load_scope_file(scope_file, required=False)
 
 
-def make_scope_filter(scope: dict):
-    roots = [str(r).lower() for r in scope.get("roots", [])]
-    excluded = [str(x).lower() for x in scope.get("excluded", [])]
-
-    def wildcard_match(host: str, patterns: list) -> bool:
-        host = host.lower().rstrip(".")
-        for p in patterns:
-            if p.startswith("*."):
-                base = p[2:]
-                if host == base or host.endswith("." + base):
-                    return True
-            elif p == host:
-                return True
-        return False
-
-    def in_scope(host: str) -> bool:
-        host = host.lower().rstrip(".")
-        bare = host.split(":")[0]
-        variants = [host] if host == bare else [host, bare]
-        if any(v in roots for v in variants):
-            return True
-        if any(wildcard_match(v, excluded) for v in variants):
-            return False
-        return any(wildcard_match(v, roots) for v in variants)
-
-    return in_scope
+# make_scope_filter: shared single source of truth, see scope_utils.py.
 
 
 def get_existing_hosts(program: str) -> set[str]:
