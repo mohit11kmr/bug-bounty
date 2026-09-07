@@ -83,19 +83,51 @@ def list_existing_targets():
             targets.add(item.name.lower())
     return targets
 
-def list_programs(page_size=50, filter_existing=True, bounty_only=False, verbose=False):
+def list_programs(page_size=50, filter_existing=True, bounty_only=False, verbose=False,
+                   sort_by="default", max_pages=1):
+    """Fetch accessible HackerOne programs.
+
+    sort_by:
+      "default"  — one page, API's own order (registration/id order — oldest first in
+                   practice), page_size results. Fast, matches original behavior exactly.
+      "recency"  — paginates through up to `max_pages` pages (100/page) and sorts by
+                   `started_accepting_at` descending. Newer programs generally have less
+                   accumulated hunter attention than long-running flagship programs — not
+                   a guarantee of low competition, just a reasonable, automatable proxy.
+    """
     existing = list_existing_targets() if filter_existing else set()
     candidates = []
-    
+
     if verbose:
         print("  [1/4] 🌐 Connecting to HackerOne API (api.hackerone.com)...", file=sys.stderr)
-        
-    status, data = h1_request("/programs", {"page[size]": str(page_size)})
-    if status != 200:
-        print(f"  [!] Error fetching programs: HTTP {status} - {data.get('error')}", file=sys.stderr)
-        return candidates
 
-    programs = data.get("data", [])
+    programs = []
+    if sort_by == "recency":
+        page = 1
+        fetch_size = 100
+        while page <= max_pages:
+            status, data = h1_request("/programs", {"page[size]": str(fetch_size), "page[number]": str(page)})
+            if status != 200:
+                if page == 1:
+                    print(f"  [!] Error fetching programs: HTTP {status} - {data.get('error')}", file=sys.stderr)
+                    return candidates
+                break
+            items = data.get("data", [])
+            if not items:
+                break
+            programs.extend(items)
+            if verbose:
+                print(f"  [1/4] ...page {page}: {len(items)} programs (running total {len(programs)})", file=sys.stderr)
+            if not data.get("links", {}).get("next"):
+                break
+            page += 1
+    else:
+        status, data = h1_request("/programs", {"page[size]": str(page_size)})
+        if status != 200:
+            print(f"  [!] Error fetching programs: HTTP {status} - {data.get('error')}", file=sys.stderr)
+            return candidates
+        programs = data.get("data", [])
+
     if verbose:
         filter_label = "Cash Bounty ($$$ Paid Only)" if bounty_only else "All Programs (Cash + VDP)"
         print(f"  [2/4] 🔍 Querying active programs (Found {len(programs)} programs on H1)...", file=sys.stderr)
@@ -107,28 +139,34 @@ def list_programs(page_size=50, filter_existing=True, bounty_only=False, verbose
         name = attrs.get("name", "")
         state = attrs.get("state", "")
         bounty = attrs.get("offers_bounties", False)
-        
+        started = attrs.get("started_accepting_at", "")
+
         if not handle:
             continue
-            
+
         if bounty_only and not bounty:
             continue
-            
+
         norm_handle = handle.lower().replace("-", "_")
         if filter_existing and (handle.lower() in existing or norm_handle in existing):
             continue
-            
+
         candidates.append({
             "id": p.get("id"),
             "handle": handle,
             "name": name,
             "state": state,
-            "offers_bounties": bounty
+            "offers_bounties": bounty,
+            "started_accepting_at": started,
         })
-        
+
+    if sort_by == "recency":
+        candidates.sort(key=lambda c: c.get("started_accepting_at") or "", reverse=True)
+        candidates = candidates[:page_size]
+
     if verbose:
         print(f"  [4/4] 🛡 Workspace check: Filtered existing targets. {len(candidates)} candidates ready.", file=sys.stderr)
-        
+
     return candidates
 
 def get_program_details(handle):
@@ -413,7 +451,8 @@ def generate_hunt_prompt(target_dir):
     rpm = allowed.get("max_requests_per_minute", 60)
     concurrency = allowed.get("max_concurrency", 5)
 
-    cand_file = BASE_DIR / "recon" / "data" / target_path.name / "candidate_report.md"
+    data_dir = BASE_DIR / "recon" / "data" / target_path.name
+    cand_file = data_dir / "candidate_report.md"
     top_candidates = []
     if cand_file.exists():
         lines = cand_file.read_text(encoding="utf-8").splitlines()
@@ -426,6 +465,42 @@ def generate_hunt_prompt(target_dir):
     candidates_block = "\n".join(top_candidates) if top_candidates else "- Run recon/intelligence.py first to rank candidates."
     roots_block = "\n".join(f"  - {r}" for r in roots) if roots else "  - (Check scope.yaml)"
     excluded_block = "\n".join(f"  - {ex}" for ex in excluded) if excluded else "  - None listed"
+
+    # Application-model awareness (Wiring Diagnostic fix #1): tell the agent this file
+    # exists so @prob-hunter is discoverable from the generated prompt itself, not only
+    # from WORKFLOW.md that the agent may never read.
+    app_model_file = data_dir / "application_model.json"
+    if app_model_file.exists():
+        app_model_block = (
+            f"An application model exists: `recon/data/{target_path.name}/application_model.json` "
+            "(actors/objects/actions/auth-surfaces extracted from recon endpoints). "
+            "Consider invoking `@prob-hunter` with candidate_report.md + this file for "
+            "deeper Bayesian ranking and BOLA/IDOR ownership hypotheses before manual testing."
+        )
+    else:
+        app_model_block = (
+            "No application_model.json yet — run `python3 recon/application_model.py "
+            f"--program {target_path.name}` first if you want @prob-hunter's actor/object ranking."
+        )
+
+    # Pre-verified findings awareness (Wiring Diagnostic fix #4): the Python autonomous
+    # path (auto_hunter.py / recon/daemon.py) may have already run on this target and
+    # verified findings independently of this session — surface them so they aren't
+    # silently missed or re-discovered from scratch.
+    prior_verified_block = "None recorded yet in recon.db."
+    db_file = data_dir / "recon.db"
+    if db_file.exists():
+        try:
+            import sqlite3
+            con = sqlite3.connect(db_file)
+            rows = con.execute(
+                "SELECT url, tag, notes FROM candidate_findings WHERE status='VERIFIED' ORDER BY updated_at DESC LIMIT 10"
+            ).fetchall()
+            con.close()
+            if rows:
+                prior_verified_block = "\n".join(f"  - [{tag}] {url} — {notes}" for url, tag, notes in rows)
+        except Exception:
+            pass
 
     prompt = f"""# MISSION: Autonomous Bug Bounty Hunting — Target: {name} ({handle})
 
@@ -448,8 +523,16 @@ Your objective is to find valid, high-impact security vulnerabilities and prepar
 ## 2. HIGH-PRIORITY ATTACK SURFACE & RECON CANDIDATES
 {candidates_block}
 
+## 2.5 APPLICATION UNDERSTANDING (deterministic actor/object/action map)
+{app_model_block}
+
+## 2.6 ALREADY VERIFIED BY THE AUTONOMOUS PIPELINE (auto_hunter.py)
+The Python `[A]`/daemon path may have already run on this target and verified findings
+independently of this session. Check these first — don't silently miss or re-discover them:
+{prior_verified_block}
+
 ## 3. YOUR EXECUTION PROTOCOL
-1. **Analyze Candidates**: Examine prioritized endpoints above (auth flows, admin panels, sensitive APIs).
+1. **Analyze Candidates**: Examine prioritized endpoints above (auth flows, admin panels, sensitive APIs), and review section 2.6 for anything already verified.
 2. **Formulate Hypotheses**:
    - Access Control: Test for IDOR / BOLA on IDs, user_ids, invoice parameters.
    - Authentication Flaws: Test token validation, OAuth redirect params, SSO callback flaws.
@@ -459,7 +542,7 @@ Your objective is to find valid, high-impact security vulnerabilities and prepar
    - Use `curl -s -i` or Burp Suite to reproduce.
    - Record exact HTTP request & response headers.
 4. **Prepare Report Artifact**:
-   - Save PoC evidence to `evidence/findings/{handle}/`.
+   - Save PoC evidence to `evidence/reports/{target_path.name}/`.
    - Match with HackerOne scope_id from `scope.yaml` for triage submission.
 
 Proceed with systematic hunting now. Focus on quality, business impact, and rigorous verification!"""
@@ -475,6 +558,11 @@ def main():
     parser.add_argument("--bounty-only", action="store_true", help="Filter for cash bounty paid programs only")
     parser.add_argument("--verbose", "-v", action="store_true", help="Print live progress steps")
     parser.add_argument("--all", action="store_true", help="Include existing targets in listing")
+    parser.add_argument("--sort-recency", action="store_true",
+                         help="List newest programs first instead of HackerOne's default order — "
+                              "newer programs generally have less accumulated hunter attention "
+                              "than long-running flagship ones (not a guarantee of low competition, "
+                              "just a reasonable, automatable starting point)")
     parser.add_argument("--setup", type=str, metavar="HANDLE", help="Auto-scaffold a target from HackerOne")
     parser.add_argument("--prompt", type=str, metavar="TARGET", help="Generate pre-filled autonomous hunt prompt for target")
     parser.add_argument("--folder", type=str, metavar="DIR", help="Custom folder name for target")
@@ -494,17 +582,22 @@ def main():
         return
 
     if args.list:
-        programs = list_programs(page_size=50, filter_existing=not args.all, bounty_only=args.bounty_only, verbose=args.verbose)
+        sort_by = "recency" if args.sort_recency else "default"
+        programs = list_programs(page_size=50, filter_existing=not args.all, bounty_only=args.bounty_only,
+                                  verbose=args.verbose, sort_by=sort_by, max_pages=10)
         if args.json:
             print(json.dumps(programs, indent=2))
         else:
             if not programs:
                 print("[h1_client] Koi naya candidate program nahi mila.")
             else:
-                print(f"[h1_client] {len(programs)} available programs on HackerOne:")
+                label = "newest-first, potentially lower-competition" if args.sort_recency else "HackerOne's default order"
+                print(f"[h1_client] {len(programs)} available programs on HackerOne ({label}):")
                 for i, p in enumerate(programs, 1):
                     bounty_tag = "💰 BOUNTY" if p.get("offers_bounties") else "ℹ VDP"
-                    print(f"  {i:2d}) {p['handle']:<20} | {p['name']} ({bounty_tag})")
+                    date_str = (p.get("started_accepting_at") or "")[:10]
+                    date_tag = f" | since {date_str}" if args.sort_recency and date_str else ""
+                    print(f"  {i:2d}) {p['handle']:<20} | {p['name']} ({bounty_tag}){date_tag}")
         return
 
     if args.setup:

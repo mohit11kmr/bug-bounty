@@ -217,6 +217,84 @@ target_stats() {
   fi
 }
 
+# =============================================================================
+# Multi-program dashboard — one-screen overview across every target workspace,
+# so juggling several programs doesn't mean opening each one just to check status.
+# =============================================================================
+show_dashboard() {
+  clear
+  title_box " 📊 DASHBOARD — ALL TARGETS " "Cross-program overview"
+  echo ""
+  local any=0
+  while IFS= read -r t; do
+    [ -z "$t" ] && continue
+    any=1
+    echo "${P}  ${B}${CYAN}$t${R}"
+    python3 -c "
+import json, sqlite3
+from pathlib import Path
+base = Path('$WS')
+d = base / 'recon' / 'data' / '$t'
+db = d / 'recon.db'
+run_meta = d / 'run_meta.json'
+
+if run_meta.exists():
+    try:
+        m = json.loads(run_meta.read_text())
+        print(f\"    Last run: {m.get('run_at','?')} (run_id={m.get('run_id','?')}, fresh={m.get('fresh_mode')})\")
+    except Exception:
+        pass
+else:
+    print('    No recon run yet.')
+
+if db.exists():
+    con = sqlite3.connect(db)
+    try:
+        rows = con.execute(\"SELECT status, count(*) FROM candidate_findings GROUP BY status\").fetchall()
+        if rows:
+            print('    Candidates: ' + ', '.join(f'{s}={c}' for s, c in rows))
+        verified = con.execute(\"SELECT count(*) FROM candidate_findings WHERE status='VERIFIED'\").fetchone()[0]
+        needs_review = con.execute(\"SELECT count(*) FROM candidate_findings WHERE status='NEEDS_MANUAL_CONFIRMATION'\").fetchone()[0]
+        if verified:
+            print(f'    \033[38;5;48m✓ {verified} VERIFIED finding(s) — check evidence/reports/$t/\033[0m')
+        if needs_review:
+            print(f'    \033[38;5;220m? {needs_review} NEEDS_MANUAL_CONFIRMATION — check recon.db / NOTES.md\033[0m')
+    except sqlite3.OperationalError:
+        print('    recon.db exists but has no candidate_findings table yet.')
+    con.close()
+else:
+    print('    No recon.db yet.')
+"
+    echo ""
+  done < <(existing_targets)
+  [ "$any" -eq 0 ] && echo "${P}  ${MUTED}Koi target nahi hai abhi.${R}"
+  echo ""
+  sep
+  read -r -p "${P}  Press Enter to return... " _
+}
+
+# =============================================================================
+# Background job status — what's actually running right now, across all programs.
+# Useful for long scope.yaml wildcard scopes where recon/scanning can run for hours.
+# =============================================================================
+show_background_jobs() {
+  clear
+  title_box " ⚙  BACKGROUND JOBS " "What's actually running right now"
+  echo ""
+  local found=0
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    found=1
+    echo "${P}  $line"
+  done < <(ps -eo pid,etime,cmd 2>/dev/null | grep -E "subfinder|dnsx|httpx|katana|nuclei|gau[[:space:]]|recon_pipeline\.py|js_miner\.py|scanner\.py|intelligence\.py|auto_hunter\.py|daemon\.py" | grep -v "grep\|show_background_jobs")
+  if [ "$found" -eq 0 ]; then
+    echo "${P}  ${MUTED}Koi bug-bounty process abhi background mein chal nahi raha.${R}"
+  fi
+  echo ""
+  sep
+  read -r -p "${P}  Press Enter to return... " _
+}
+
 check_opencode() {
   if ! command -v "$OPCODE_BIN" >/dev/null 2>&1 && [ ! -x "$OPCODE_BIN" ]; then
     echo ""
@@ -263,6 +341,83 @@ YAML
 MD
   fi
   [ -f "$tdir/NOTES.md" ] || echo "# $handle — Hunt Progress" > "$tdir/NOTES.md"
+}
+
+# =============================================================================
+# Authenticated test-account setup — enables the opt-in IDOR heuristic in
+# recon/auto_hunter.py (load_auth_credentials()). Writes <target>/.env.auth.
+# Works for any HackerOne program with a session-token- or cookie-based test
+# account — nothing here is specific to any one site.
+# =============================================================================
+setup_auth_credentials() {
+  local target="$1"
+  local tdir="$WS/$target"
+  local auth_file="$tdir/.env.auth"
+  clear
+  title_box " 🔑 AUTHENTICATED TEST ACCOUNT: $target " "Enables the IDOR heuristic in auto_hunter.py"
+  echo ""
+  echo "${P}  ${MUTED}This lets the automated pipeline replay requests as a logged-in test"
+  echo "${P}  ${MUTED}account and check for IDOR (one account accessing another's numeric-ID"
+  echo "${P}  ${MUTED}resources). It is completely optional — nothing changes for this target"
+  echo "${P}  ${MUTED}until you fill this in, and it never runs against any program you"
+  echo "${P}  ${MUTED}haven't set this up for.${R}"
+  echo ""
+  echo "${P}  ${B}You'll need a real test/collab account you're authorized to use on"
+  echo "${P}  this specific program${R} — check the program's policy for how to get one."
+  echo ""
+  if [ -f "$auth_file" ]; then
+    echo "${P}  ${GREEN}An .env.auth already exists for '$target':${R}"
+    echo ""
+    grep "AUTH_HEADER" "$auth_file" 2>/dev/null | sed "s/^/${P}    /"
+    echo "${P}    AUTH_VALUE=<hidden>"
+    echo ""
+    echo "${P}  [1] Replace it   [0] Keep it and go back"
+    local rep
+    read -r -p "${P}  Choice: " rep
+    [ "$rep" != "1" ] && return
+    echo ""
+  fi
+
+  echo "${P}  ${B}Step 1 — which header carries your session?${R}"
+  echo "${P}    [1] Authorization  (e.g. an API bearer token: \"Bearer eyJ...\")"
+  echo "${P}    [2] Cookie         (e.g. a logged-in browser session: \"session=...\")"
+  echo "${P}    [3] Custom header name (type your own, e.g. \"X-Api-Key\")"
+  local hchoice header_name
+  read -r -p "${P}  Choice [1-3, or 0 to cancel]: " hchoice
+  case "$hchoice" in
+    1) header_name="Authorization" ;;
+    2) header_name="Cookie" ;;
+    3) read -r -p "${P}  Header name: " header_name ;;
+    *) return ;;
+  esac
+  [ -z "$header_name" ] && { echo "${P}  ${RED}Header name khali nahi ho sakta.${R}"; sleep 2; return; }
+
+  echo ""
+  echo "${P}  ${B}Step 2 — paste the full header value${R}"
+  echo "${P}    ${MUTED}(e.g. \"Bearer eyJhbGciOi...\" or \"session=abc123; other=xyz\" —"
+  echo "${P}    whatever your browser's DevTools \"Network\" tab shows for that header"
+  echo "${P}    on a request you make while logged in as your test account)${R}"
+  local header_value
+  read -r -p "${P}  Value: " header_value
+  if [ -z "$header_value" ]; then
+    echo "${P}  ${RED}Value khali hai — cancel kar raha hoon.${R}"; sleep 2; return
+  fi
+
+  mkdir -p "$tdir"
+  cat > "$auth_file" <<AUTHEOF
+# Authenticated test-account session for '$target' — used only by recon/auto_hunter.py's
+# opt-in IDOR heuristic (load_auth_credentials()). Never committed (see .gitignore: **/.env.*).
+export AUTH_HEADER="$header_name"
+export AUTH_VALUE="$header_value"
+AUTHEOF
+  chmod 600 "$auth_file"
+  echo ""
+  echo "${P}  ${GREEN}✓ Saved to $auth_file (chmod 600, gitignored).${R}"
+  echo "${P}  ${MUTED}Next time you run auto_hunter.py (standalone, or via [A]/[F]) for"
+  echo "${P}  '$target', it will print '🔑 Authenticated IDOR heuristic ENABLED'.${R}"
+  echo ""
+  sep
+  read -r -p "${P}  Press Enter to continue... " _
 }
 
 # =============================================================================
@@ -629,11 +784,13 @@ target_menu() {
     opt "5" "View Candidate Report"             "Top-40 scored findings queue"
     opt "6" "Recon Diff Engine"                 "Check for newly deployed subdomains"
     opt "7" "View Scope & Notes"                "SCOPE.md & NOTES.md"
+    opt "8" "🔑 Set Up Authenticated Test Account" "enables the auto_hunter.py IDOR heuristic"
+    opt "9" "🩺 Check Data Freshness"            "is recon.db in sync with assets/endpoints.json?"
     opt "0" "↩ Back to Main Menu"               "return to mission control"
     echo ""
     sep
     local act
-    read -r -p "${P}  ${B}Action for [$target]${R} [A/F/C/0-7, or B to return]: " act
+    read -r -p "${P}  ${B}Action for [$target]${R} [A/F/C/0-9, or B to return]: " act
 
     case "$act" in
       [aA]*)
@@ -677,7 +834,32 @@ target_menu() {
         local t_recon_dur=$(( $(date +%s) - t_recon_start ))
         echo ""
         sep
-        read -r -p "${P}  ✓ Recon complete in ${t_recon_dur}s. Press Enter or [0] to continue..." _
+        echo "${P}  ✓ Recon complete in ${t_recon_dur}s."
+        # Scan-scale preview — a wildcard-heavy scope.yaml (*.example.org style) can
+        # legitimately return tens of thousands of hosts, most of them redirects/dead.
+        # Show the real breakdown before anyone commits hours to scanning all of them.
+        python3 -c "
+import json, sys
+try:
+    assets = json.load(open('$WS/recon/data/$target/assets.json'))
+except Exception:
+    sys.exit(0)
+if len(assets) < 500:
+    sys.exit(0)  # small scope — no need to warn
+from collections import Counter
+statuses = Counter(a.get('status') for a in assets)
+live200 = sum(1 for a in assets if a.get('status') == 200)
+print()
+print(f'  ⚠  Large scope: {len(assets)} total assets discovered.')
+print(f'     Status breakdown: ' + ', '.join(f'{k}={v}' for k, v in statuses.most_common()))
+print(f'     Only {live200} return a genuine HTTP 200 (rest are redirects/errors) —')
+print(f'     those {live200} are usually the real, distinct, worth-scanning surface.')
+print(f'     Running Nuclei/JS-mining on ALL {len(assets)} could take hours-to-days at')
+print(f'     safe rate limits. Consider option 9 (Data Freshness) or manually filtering')
+print(f'     assets.json to status==200 before running a full scan on a scope this size.')
+"
+        sep
+        read -r -p "${P}  Press Enter or [0] to continue..." _
         ;;
       3)
         echo ""
@@ -757,6 +939,18 @@ target_menu() {
         echo ""
         echo "${P}=== $target/NOTES.md ==="
         [ -f "$WS/$target/NOTES.md" ] && cat "$WS/$target/NOTES.md"
+        echo ""
+        sep
+        read -r -p "${P}  Press Enter or [0] to return... " _
+        ;;
+      8)
+        setup_auth_credentials "$target"
+        ;;
+      9)
+        clear
+        title_box " 🩺 DATA FRESHNESS: $target " "Is recon.db in sync with assets.json / endpoints.json?"
+        echo ""
+        python3 "$WS/recon/artifact_consistency.py" --program "$target"
         echo ""
         sep
         read -r -p "${P}  Press Enter or [0] to return... " _
@@ -859,22 +1053,27 @@ new_scan() {
     opt "1" '💰 Cash Bounties Only ($$$)'   "fetch only paid programs with guaranteed rewards"
     opt "2" "🌐 All Programs (Paid + VDP)"   "bounty programs + vulnerability disclosure"
     opt "3" "🎯 Manual Program Handle"      "type any handle e.g. shopify, gitlab, uber"
+    opt "4" "🌱 Find Newer/Less-Crowded Programs" "sorted by newest-on-HackerOne first"
     opt "0" "↩ Back to Main Menu"           "return to mission control"
     echo ""
     sep
     local s_mode
-    read -r -p "${P}  ${B}Select Scan Type [0-3, or B to return]:${R} " s_mode
+    read -r -p "${P}  ${B}Select Scan Type [0-4, or B to return]:${R} " s_mode
 
     case "$s_mode" in
       0|[bB]*|[qQ]*)
         return
         ;;
-      1|2)
-        local bounty_flag=""
+      1|2|4)
+        local bounty_flag="" sort_flag=""
         local scan_title="ALL HACKERONE PROGRAMS"
         if [ "$s_mode" = "1" ]; then
           bounty_flag="--bounty-only"
           scan_title="PAID CASH BOUNTY PROGRAMS"
+        elif [ "$s_mode" = "4" ]; then
+          bounty_flag="--bounty-only"
+          sort_flag="--sort-recency"
+          scan_title="NEWEST PROGRAMS ON HACKERONE (potentially less-crowded — not a guarantee)"
         fi
 
         if [ -z "${H1_USERNAME:-}" ] || [ -z "${H1_API_TOKEN:-}" ]; then
@@ -897,7 +1096,7 @@ new_scan() {
 
         # Live scanning with verbose progress steps visible to user
         local raw_json
-        raw_json=$(python3 "$WS/recon/h1_client.py" --list $bounty_flag --verbose --json)
+        raw_json=$(python3 "$WS/recon/h1_client.py" --list $bounty_flag $sort_flag --verbose --json)
 
         if [ -z "$raw_json" ] || [ "$raw_json" = "[]" ]; then
           echo ""
@@ -915,6 +1114,9 @@ import json, sys
 data = json.load(sys.stdin)
 for p in data:
     b = '💰 Bounty' if p.get('offers_bounties') else 'ℹ VDP'
+    started = (p.get('started_accepting_at') or '')[:10]
+    if started:
+        b = f'{b} (since {started})'
     print(f\"{p['handle']}|{p['name']}|{b}\")
 " <<< "$raw_json")
 
@@ -1136,6 +1338,8 @@ main_menu() {
     opt "M" "🔄 Continuous Recon Daemon" "background delta watcher & automated alerting"
     opt "T" "📱 Telegram & Phone Alerts" "pair phone number & setup telegram notifications"
     opt "D" "🔍 System Diagnostics"      "tools, APIs, Docker & environment audit"
+    opt "V" "📊 Dashboard (all targets)" "candidates, verified findings, last run — one screen"
+    opt "J" "⚙  Background Jobs"         "what's actually running right now"
     opt "Q" "🚪 Quit"                    "exit mission control"
     echo ""
     sep
@@ -1155,13 +1359,15 @@ main_menu() {
     echo ""
     sep
     local choice
-    read -r -p "${P}  ${B}Select Target [1-$n] or Action [N/M/T/D/Q]:${R} " choice
+    read -r -p "${P}  ${B}Select Target [1-$n] or Action [N/M/T/D/V/J/Q]:${R} " choice
 
     case "$choice" in
       [nN]*) new_scan ;;
       [mM]*) daemon_menu ;;
       [tT]*) python3 "$WS/recon/notify.py" --setup-telegram ;;
       [dD]*) diagnostics_check ;;
+      [vV]*) show_dashboard ;;
+      [jJ]*) show_background_jobs ;;
       [qQ]*) echo "${P}  Happy hunting. Bye!"; exit 0 ;;
       *)
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ]; then

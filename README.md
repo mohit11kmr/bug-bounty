@@ -30,21 +30,38 @@ second opinion → report. SIRF in-scope. Koi out-of-scope/unauthorized testing 
 
 ## System map (kaun sa file kya karta hai)
 
+> Ye table sirf top-level docs/config hai. **Poora, code-verified pipeline wiring
+> (har module, har flag, [A] vs [C] ka farak, tree diagram) `WORKFLOW_ACTUAL.md` mein
+> hai** — us file mein sab kuch real audit + real tool-execution se confirm kiya gaya
+> hai, sirf doc padh ke nahi likha gaya.
+
 | File/Path | Role |
 |-----------|------|
-| `start-bugbounty.sh` | Launcher (new-scan / continue-existing) |
+| `start-bugbounty.sh` | Launcher — menu keys: `N/M/T/D/Q` + target select → `A`(auto)/`F`(fresh)/`C`(complete)/`1-7` |
 | `opencode.json` | Config: default agent + skills + hackerone MCP (global) |
 | `AGENTS.md` / `HUNTING_GUIDE.md` | Structure rules + learning path |
-| `WORKFLOW.md` | Operational flow (entry → report) |
+| `WORKFLOW.md` | Intended/manual operational flow — mainly the `[C]` (OpenCode agent) path |
+| `WORKFLOW_ACTUAL.md` | **Actual, code-verified wiring** — tree + detail, `[A]` autonomous path included, real audit evidence |
 | `IF_ELSE.md` | if/else decision tree (tool/skill routing, single source) |
-| `recon/recon_pipeline.py` | Recon → `recon/data/<p>/` assets/endpoints JSON |
-| `recon/scanner.py` | Safe scope-aware nuclei/ffuf → recon.db |
-| `recon/intelligence.py` | Deterministic candidate scoring → candidate_report.md (free breadth) |
+| `recon/scope_utils.py` | Single-source scope.yaml loader + in-scope matcher (all other modules import this) |
+| `recon/h1_client.py` | HackerOne API client — target scaffold (scope.yaml/SCOPE.md/NOTES.md/opencode.json) + `--prompt` generator |
+| `recon/recon_pipeline.py` | Phase 1: subfinder→dnsx→httpx→gau → `assets.json`/`endpoints.json` (run_id tagged, `--fresh` to force re-enumeration) |
+| `recon/js_miner.py` | Phase 2: Katana JS crawl + secret extraction → endpoints merge |
+| `recon/application_model.py` | Actors/objects/actions extractor → `application_model.json` (consumed by `@prob-hunter`, not by the Python pipeline) |
+| `recon/scanner.py` | Phase 3: safe scope-aware Nuclei/ffuf → `candidate_findings` |
+| `recon/intelligence.py` | Phase 4: deterministic candidate scoring → `candidate_report.md` + DB rebuild |
+| `recon/auto_hunter.py` | `[A]`-only: automated CORS/secret-leak/traversal verification, no human gate |
+| `recon/report_gen.py` | Auto-generates HackerOne markdown draft on VERIFIED findings (`--sample` → quarantined to `sample/`, never mixed with real reports) |
+| `recon/notify.py` | Desktop + Telegram alert dispatch |
+| `recon/daemon.py` | Background delta-watcher — re-triggers the full chain when a new subdomain appears |
+| `recon/artifact_consistency.py` | Manual diagnostic: is `recon.db` in sync with `assets.json`/`endpoints.json`, or stale? |
 | `prompts/prob_hunter_prompt.txt` | prob-hunter Bayesian depth-rank prompt (source of truth — registered agent `~/.config/opencode/agents/prob-hunter.md` reads this via `@prob-hunter`) |
-| `.opencode/skills/{triage,grilling,grill-me,handoff}` | Finding state-machine, interrogation, session handoff |
+| `.opencode/skills/{triage,grilling,grill-me,handoff}` | Finding state-machine, interrogation, session handoff — used in the `[C]` path only |
 | `<program>/scope.yaml` + SCOPE.md + NOTES.md | Per-target scope + progress |
-| `evidence/` | Handoffs, screenshots, scan outputs |
+| `evidence/` | Handoffs, screenshots, scan outputs, reports (`sample/` vs real, strictly separated) |
 | `reports/` | drafts + templates |
+| `tests/` | Real integration tests — actual `subfinder`/`httpx`/`katana`/`nuclei` runs, not mocks |
+| `docs/audit/` | Forensic audit reports — real, executed evidence behind every claim in `WORKFLOW_ACTUAL.md` |
 | `~/.config/opencode/skills/bug-bounty/TOOLS.md` | Tool-level if/else routing (18 tools + docker + MCP) |
 
 ## License / Authorization
@@ -64,5 +81,7 @@ second opinion → report. SIRF in-scope. Koi out-of-scope/unauthorized testing 
 | 2026-09-05 | prob-hunter model → `opencode/big-pickle` (OpenRouter credits blocker removed) | opencode.json |
 | 2026-09-05 | 4 skills (triage, grilling, grill-me, handoff) wired into workflow: finding → triage → grilling → claude-reviewer → submit; session-end → handoff → `evidence/handoffs/` | WORKFLOW.md §8-13, IF_ELSE.md §13 |
 | 2026-09-05 | Global audit: 18 tools OK, docker ZAP+wpscan present, bb-hunt symlink OK | (audit record) |
+| 2026-09-06 | Two forensic audits: fixed real httpx double-write race, added `--fresh` cache-bypass, run_id ownership on assets/endpoints/candidate_findings, `recon/artifact_consistency.py` stale-DB diagnostic, `recon/scope_utils.py` (killed 5-way scope-logic duplication), daemon.py Nuclei wiring, clean operator error messages | recon/*.py (all), docs/audit/*.md |
+| 2026-09-06 | System map + new `WORKFLOW_ACTUAL.md` written from real code/tool-execution audit (not from re-reading old docs) — documents both `[A]` autonomous and `[C]` OpenCode-handoff paths, which `WORKFLOW.md` alone doesn't distinguish | README.md, WORKFLOW_ACTUAL.md |
 
 > Naye change → yaah ek row add karo (date + kya + files). Is file ko bhi update karte raho.

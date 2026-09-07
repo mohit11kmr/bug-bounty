@@ -41,6 +41,12 @@ DEFAULT_EXCLUDE_TAGS = "dos,fuzz,brute-force,crlf,injection,rce,kev"  # "safe sc
 DEFAULT_INCLUDE_TAGS = os.environ.get("NUCLEI_INCLUDE_TAGS", "exposure,config,misconfig,tech,cve,default-login")  # high-value, low-noise
 NUCLEI_SEVERITY = os.environ.get("NUCLEI_SEVERITY", "low,medium,high,critical")
 NUCLEI_MAX_TIME = int(os.environ.get("NUCLEI_MAX_TIME", "900"))  # 15 min cap — full coverage per host at safe RPS (0 = no cap)
+# Per-request timeout & max-host-error (nuclei default 30!): a genuinely large/wildcard scope
+# (e.g. hundreds of hosts, some slow/WAF-blocking) can otherwise spend hours retrying dead hosts
+# 30 times each before giving up — real, observed behavior, not theoretical. Configurable via env
+# the same way the other NUCLEI_* knobs are, for anyone with a different tolerance.
+NUCLEI_TIMEOUT = int(os.environ.get("NUCLEI_TIMEOUT", "5"))
+NUCLEI_MAX_HOST_ERROR = int(os.environ.get("NUCLEI_MAX_HOST_ERROR", "3"))
 DEFAULT_RUN_ON = "live"  # "live" = 200/30x hosts only, "all" = har asset, "list:x,y" = explicit
 
 
@@ -183,6 +189,8 @@ def nuclei_scan(program: str, scope: dict, targets: list[str], dry: bool,
         "-max-time", str(NUCLEI_MAX_TIME),
         "-rate-limit", str(max(1, rpm // 2)),   # safe: half the documented rpm
         "-c", str(concurrency),
+        "-timeout", str(NUCLEI_TIMEOUT),
+        "-max-host-error", str(NUCLEI_MAX_HOST_ERROR),
         "-nc",
     ]
     for idx, t in enumerate(targets, 1):

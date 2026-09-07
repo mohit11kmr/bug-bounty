@@ -62,6 +62,89 @@ def load_scope(program: str) -> dict:
     return load_scope_file(scope_file, required=False)
 
 
+def load_auth_credentials(program: str) -> dict | None:
+    """Load a single test-account auth header from <program>/.env.auth, if present.
+
+    Opt-in only: authenticated/IDOR probing (see check_idor()) is entirely disabled for
+    a program until this file exists — no existing program's behavior changes.
+
+    Expected format (bash-style, gitignored via '**/.env.*'):
+        export AUTH_HEADER="Authorization"
+        export AUTH_VALUE="Bearer <token>"
+    or, for cookie-based auth:
+        export AUTH_HEADER="Cookie"
+        export AUTH_VALUE="session=<value>"
+    """
+    auth_file = BASE / program / ".env.auth"
+    if not auth_file.exists():
+        return None
+    creds = {}
+    for line in auth_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        line = line.removeprefix("export ").strip()
+        if "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        creds[key.strip()] = val.strip().strip('"').strip("'")
+    if "AUTH_HEADER" in creds and "AUTH_VALUE" in creds:
+        return creds
+    return None
+
+
+_IDOR_ID_RE = re.compile(r"(/|[?&]\w*id\w*=)(\d{2,})")
+
+
+def check_idor(url: str, auth_creds: dict) -> dict | None:
+    """Heuristic authenticated-IDOR candidate check (opt-in, requires .env.auth).
+
+    NOT a certain verification like the other checks in verify_candidate() — it cannot
+    prove a different numeric ID belongs to another real user, only that the same
+    authenticated session can fetch substantive-looking data for more than one ID.
+    Callers must surface this as NEEDS_MANUAL_CONFIRMATION, never as a blind VERIFIED.
+    """
+    # Search only the path+query, never scheme://netloc — an IP:port host (e.g.
+    # 127.0.0.1:38445) or a numeric-looking domain segment would otherwise match as a
+    # false "ID", since /\d+/ ("//127...") is indistinguishable from a real path ID.
+    parsed = urllib.parse.urlparse(url)
+    path_start = len(parsed.scheme) + len("://") + len(parsed.netloc)
+    m = _IDOR_ID_RE.search(url, pos=path_start)
+    if not m:
+        return None
+    prefix, id_str = m.group(1), m.group(2)
+    original_id = int(id_str)
+    auth_header = {auth_creds["AUTH_HEADER"]: auth_creds["AUTH_VALUE"]}
+
+    orig_status, _, orig_body = safe_request(url, headers=auth_header, timeout=5)
+    if orig_status != 200 or len(orig_body) < 20:
+        return None  # can't even fetch the original ID authenticated — nothing to compare
+
+    error_sigs = ["not found", "forbidden", "unauthorized", "access denied", "no permission", "invalid id"]
+    for candidate_id in (original_id - 1, original_id + 1):
+        if candidate_id <= 0:
+            continue
+        alt_url = url[: m.start()] + prefix + str(candidate_id) + url[m.end():]
+        status, _, body = safe_request(alt_url, headers=auth_header, timeout=5)
+        if status != 200 or len(body) < 20:
+            continue
+        if any(sig in body.lower() for sig in error_sigs):
+            continue
+        # Same session, 200, substantive body, on an ID it doesn't legitimately own.
+        return {
+            "alt_url": alt_url,
+            "alt_id": candidate_id,
+            "original_id": original_id,
+            "evidence_notes": (
+                f"Authenticated session accessed ID {candidate_id} at {alt_url} "
+                f"(HTTP 200, {len(body)} bytes) — same session's own ID appears to be "
+                f"{original_id}. NEEDS MANUAL CONFIRMATION: verify {candidate_id} is not "
+                f"this account's own resource before treating as IDOR."
+            ),
+        }
+    return None
+
+
 # make_scope_filter: shared single source of truth, see scope_utils.py.
 
 
@@ -88,10 +171,13 @@ def safe_request(url: str, method: str = "GET", headers: dict | None = None, dat
         return 0, {}, ""
 
 
-def verify_candidate(candidate: dict, is_in_scope) -> dict | None:
+def verify_candidate(candidate: dict, is_in_scope, auth_creds: dict | None = None) -> dict | None:
     """Run non-destructive heuristic verification against candidate endpoint.
 
     Returns verified finding dict or None if false positive / non-vulnerable / blocked.
+    `auth_creds` (from load_auth_credentials()) is optional — when present, an extra
+    IDOR heuristic check runs (see check_idor()); its result is always surfaced as
+    status='NEEDS_MANUAL_CONFIRMATION', never blindly as 'VERIFIED'.
     """
     url = candidate.get("url", "")
     tag = candidate.get("tag", "normal")
@@ -105,8 +191,13 @@ def verify_candidate(candidate: dict, is_in_scope) -> dict | None:
     if not is_in_scope(host):
         return None
 
-    # Step 1: Reachability check
-    status, headers, body = safe_request(url, timeout=5)
+    # Step 1: Reachability check. When an auth_creds test session is configured, probe
+    # with it — an authenticated-only endpoint (401 with no header) would otherwise be
+    # discarded here before the IDOR check (step E, below) ever gets a chance to run.
+    # Harmless for unauthenticated checks too: an extra header a public endpoint doesn't
+    # need is simply ignored by it.
+    reach_headers = {auth_creds["AUTH_HEADER"]: auth_creds["AUTH_VALUE"]} if auth_creds else None
+    status, headers, body = safe_request(url, headers=reach_headers, timeout=5)
     if status not in (200, 201, 301, 302, 307, 308):
         # 403 Forbidden, 404 Not Found, 502/503 Cloudflare blocks are discarded
         return None
@@ -160,6 +251,24 @@ def verify_candidate(candidate: dict, is_in_scope) -> dict | None:
             verified = True
             evidence_notes = f"Verified accessible authentication/admin surface (HTTP {status})"
 
+    # E. Authenticated IDOR heuristic (opt-in — only runs if .env.auth is configured for
+    # this program). Deliberately NOT folded into `verified` above: unlike CORS/secret-leak/
+    # GraphQL/admin-panel (all deterministic, certain signals), this is a probabilistic
+    # signal that needs a human to confirm the alternate ID actually belongs to someone else.
+    if not verified and auth_creds:
+        idor = check_idor(url, auth_creds)
+        if idor:
+            return {
+                "url": url,
+                "host": host,
+                "method": "GET",
+                "tag": "idor_candidate",
+                "score": score,
+                "notes": idor["evidence_notes"],
+                "confidence": 0.4,
+                "status": "NEEDS_MANUAL_CONFIRMATION",
+            }
+
     # NOTE: Normal API endpoints returning HTTP 200 are NOT verified vulnerabilities.
     # Fabricated API 200 fallback has been removed to prevent false positives.
 
@@ -190,6 +299,10 @@ def run_auto_hunter(program: str, min_score: int = 50, dry_run: bool = False) ->
     is_in_scope = make_scope_filter(scope)
     rpm = int(scope.get("allowed", {}).get("max_requests_per_minute") or 60)
     delay = max(0.5, 60.0 / max(1, rpm))
+
+    auth_creds = load_auth_credentials(program)
+    if auth_creds:
+        print(f"[auto_hunter] 🔑 Authenticated IDOR heuristic ENABLED for '{program}' (.env.auth found).")
 
     db_path = RECON / "data" / program / "recon.db"
     if not db_path.exists():
@@ -226,10 +339,22 @@ def run_auto_hunter(program: str, min_score: int = 50, dry_run: bool = False) ->
 
         cand_dict = {"id": cid, "url": url, "host": host, "method": method, "tag": tag, "score": score, "notes": notes}
         t_start = datetime.now()
-        verified = verify_candidate(cand_dict, is_in_scope)
+        verified = verify_candidate(cand_dict, is_in_scope, auth_creds=auth_creds)
         dur = (datetime.now() - t_start).total_seconds()
 
-        if verified:
+        if verified and verified.get("status") == "NEEDS_MANUAL_CONFIRMATION":
+            # Heuristic IDOR signal — probabilistic, not certain. Recorded for human
+            # review only: no auto-report, no push alert, and NOT counted in
+            # verified_findings (that list feeds the "N verified" summary + notify.py,
+            # which must stay reserved for deterministic, certain findings).
+            print(f" \033[38;5;220m? NEEDS MANUAL CONFIRMATION\033[0m ({dur:.1f}s)", flush=True)
+            print(f"     ↳ {verified['notes']}", flush=True)
+            cur.execute(
+                "UPDATE candidate_findings SET status='NEEDS_MANUAL_CONFIRMATION', tag=?, confidence=?, notes=?, updated_at=? WHERE id=?",
+                (verified["tag"], verified["confidence"], verified["notes"], datetime.now().isoformat(), cid),
+            )
+            con.commit()
+        elif verified:
             print(f" \033[38;5;48m✓ VERIFIED\033[0m ({dur:.1f}s)", flush=True)
             print(f"     ↳ {verified['notes']}", flush=True)
             verified_findings.append(verified)
