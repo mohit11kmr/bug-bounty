@@ -33,6 +33,14 @@ priceline_progress_report/
 **/*_root_report.md
 **/*root_report*
 **/AUTONOMOUS_HUNT_PROMPT.md
+**/SCOPE.md
+**/EMULATOR_ROOT.md
+*/opencode.json
+
+# ---- Account/subscription server data (emails, password hashes, usage) ----
+account_data.db
+.account_server.log
+.autopilot.log
 
 # ---- Recon/target data (program-specific, includes recon.db + candidates) ----
 recon/data/
@@ -52,8 +60,18 @@ recon/data/
 *.bin
 *.qcow2
 *.so
+# The two compiled extension modules ARE the shipped product for the
+# proprietary verification/scoring logic (see proprietary/ + build_proprietary.sh)
+# — they must be tracked even though *.so is ignored by default above.
+!recon/_auto_hunter_core*.so
+!recon/_intelligence_core*.so
 magisk_extract/
 emulator/
+
+# ---- Proprietary logic source — compiled to .so before shipping, source
+# itself must never be committed/pushed (see build_proprietary.sh) ----
+proprietary/
+.build_venv/
 
 # ---- Dependencies / runtime ----
 node_modules/
@@ -61,6 +79,22 @@ node_modules/
 .playwright-mcp/
 __pycache__/
 *.pyc
+
+# ---- Internal/operational docs — engineering history, backlog, deploy-ops
+# notes written for the operator, not the end-user. Product docs (README,
+# SUPPORT, legal/, docs/MERA_HUNTING_MANUAL.md) are NOT covered by this and
+# stay tracked. ----
+WORKFLOW.md
+WORKFLOW_ACTUAL.md
+IF_ELSE.md
+docs/FUTURE_FEATURES.md
+docs/SESSION_SUMMARY_*.md
+docs/audit/
+docs/deploy_account_server_gcp.sh
+prompts/
+
+# ---- Discarded/junk files (moved aside, never pushed) ----
+trash/
 
 # ---- OS/junk ----
 .DS_Store

@@ -1,0 +1,56 @@
+name: Tests
+
+# Runs the project's real test suite on every push/PR to main.
+# Philosophy match: this repo's tests hit real subfinder/dnsx/httpx/katana/nuclei
+# against local HTTP fixtures (no fabricated results, see tests/test_runtime_integrity.py) —
+# so this workflow installs the same real tools rather than mocking them out.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          # MUST match the Python minor version build_proprietary.sh was run
+          # with — recon/_auto_hunter_core*.so and _intelligence_core*.so are
+          # compiled CPython extensions, ABI-locked to an exact minor version
+          # (e.g. a cpython-312 .so will NOT import under Python 3.11).
+          python-version: '3.12'
+
+      - name: Set up Go (needed to install the ProjectDiscovery recon tools)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Cache Go install cache
+        uses: actions/cache@v4
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-recon-tools-v1
+
+      - name: Install recon tools (subfinder, dnsx, httpx, gau, katana, nuclei)
+        run: |
+          go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          go install -v github.com/projectdiscovery/katana/cmd/katana@latest
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          go install -v github.com/lc/gau/v2/cmd/gau@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Bash syntax check
+        run: bash -n start-bugbounty.sh
+
+      - name: Python compile check
+        run: python3 -m py_compile recon/*.py
+
+      - name: Run real test suite
+        run: python3 -m unittest discover -s tests -p "test_*.py" -v

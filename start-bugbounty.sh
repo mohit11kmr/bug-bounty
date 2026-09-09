@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Bug Bounty — Mission Control & Autonomous Hunting Launcher
+# TriagePilot — Mission Control & Autonomous Hunting Launcher (v1.0.0)
 # High-Performance Terminal Suite for Authorized HackerOne Engagements.
 # Features:
 # - Live multi-step HackerOne program discovery (Cash Bounty vs All filter)
@@ -10,11 +10,15 @@
 set -uo pipefail
 
 export PYTHONUNBUFFERED=1
-WS="$HOME/Desktop/projects/bug-bounty"
+# Derived from the script's own location — never hardcoded — so this launcher
+# works for any user/company regardless of where they clone/install the repo.
+WS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---- Load HackerOne Credentials (.env.h1) & Enforce Permissions ----
 [ -f "$WS/.env.h1" ] && chmod 600 "$WS/.env.h1" 2>/dev/null || true
 [ -f "$WS/.env.notify" ] && chmod 600 "$WS/.env.notify" 2>/dev/null || true
+[ -f "$WS/.env.wpscan" ] && chmod 600 "$WS/.env.wpscan" 2>/dev/null || true
+[ -f "$WS/.env.account" ] && chmod 600 "$WS/.env.account" 2>/dev/null || true
 
 if [ -z "${H1_USERNAME:-}" ] || [ -z "${H1_API_TOKEN:-}" ]; then
   if [ -f "$WS/.env.h1" ]; then
@@ -40,12 +44,50 @@ LINE=$'\e[38;5;241m'
 
 # ---- Desktop Auto-Wrap (Only for interactive double-click launch with 0 arguments) ----
 if [ ! -t 1 ] && [ "$#" -eq 0 ] && [ "${BASH_LAUNCHER_NOTTY:-0}" != "1" ]; then
-  exec xfce4-terminal --title="Bug Bounty — Mission Control" \
+  exec xfce4-terminal --title="TriagePilot — Mission Control" \
     --geometry=120x36 --working-directory="$WS" \
     -e "bash -lc 'exec \"$0\"'"
 fi
 
 cd "$WS" || exit 1
+
+# ---- Hard requirement check — fail with a clear message, not a cryptic
+# mid-script crash, if the one non-negotiable dependency is missing ----
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: python3 not found. Install it first (e.g. 'sudo apt install python3') and re-run this launcher." >&2
+  exit 1
+fi
+
+# ---- Account/subscription server — auto-start a LOCAL instance if no remote
+# one is configured (ACCOUNT_SERVER_URL unset/default). This only ever touches
+# localhost:8899, never a real deployed server — once ACCOUNT_SERVER_URL points
+# somewhere real (see docs/deploy_account_server_gcp.sh), this is a no-op.
+# Runs before any UI/color setup so it works identically for --auto/--daemon
+# invocations too, where recon_pipeline.py's account-gate would otherwise hit
+# the same "connection refused" this was built to prevent. ----
+if [ -z "${ACCOUNT_SERVER_URL:-}" ] || [[ "$ACCOUNT_SERVER_URL" == *"127.0.0.1"* ]] || [[ "$ACCOUNT_SERVER_URL" == *"localhost"* ]]; then
+  if ! python3 -c "
+import urllib.request, sys
+try:
+    urllib.request.urlopen('${ACCOUNT_SERVER_URL:-http://127.0.0.1:8899}/health', timeout=2)
+except Exception:
+    sys.exit(1)
+" >/dev/null 2>&1; then
+    secret_file="$WS/.env.account_admin"
+    if [ ! -f "$secret_file" ]; then
+      new_secret="$(python3 -c 'import secrets; print(secrets.token_hex(24))')"
+      printf '# Admin secret for recon/account_client.py --admin-set-tier / --admin-reset-password.\n# Auto-generated on first local run. Never committed (.gitignore: **/.env.*).\nexport ACCOUNT_ADMIN_SECRET="%s"\n' "$new_secret" > "$secret_file"
+      chmod 600 "$secret_file"
+      echo "Generated a local admin secret at $secret_file (needed for tier upgrades after payment)."
+    fi
+    # shellcheck disable=SC1090
+    source "$secret_file"
+    export ACCOUNT_ADMIN_SECRET
+    nohup python3 "$WS/recon/account_server.py" >> "$WS/.account_server.log" 2>&1 &
+    disown 2>/dev/null || true
+    sleep 1
+  fi
+fi
 
 # =============================================================================
 # UI Primitives & Centered Responsive Framing
@@ -56,10 +98,19 @@ P=""
 
 update_geom() {
   local cols=""
-  if [ -n "${COLUMNS:-}" ] && [ "$COLUMNS" -gt 0 ] 2>/dev/null; then
-    cols="$COLUMNS"
-  elif command -v tput >/dev/null 2>&1; then
+  # tput cols queries the terminal driver directly, so it always reflects the
+  # CURRENT window size (e.g. after going fullscreen). $COLUMNS is a shell
+  # variable set once at startup — it goes stale on resize (bash only
+  # refreshes it after a foreground command completes with checkwinsize on,
+  # which isn't reliable inside a script's own read-loops), so it must only
+  # be a fallback, never checked first.
+  if command -v tput >/dev/null 2>&1; then
     cols="$(tput cols 2>/dev/null || true)"
+  fi
+  if [ -z "$cols" ] || [ "$cols" -le 0 ] 2>/dev/null; then
+    if [ -n "${COLUMNS:-}" ] && [ "$COLUMNS" -gt 0 ] 2>/dev/null; then
+      cols="$COLUMNS"
+    fi
   fi
   if [ -z "$cols" ] || [ "$cols" -le 0 ] 2>/dev/null; then
     cols=80
@@ -274,6 +325,63 @@ else:
 }
 
 # =============================================================================
+# Autopilot — one ON/OFF toggle: auto-picks a fresh program, auto-creates its
+# folder, auto-runs the full zero-touch hunt, then auto-moves to the next
+# fresh program — forever, until turned off. See recon/autopilot.py.
+# =============================================================================
+autopilot_menu() {
+  local pid_file="$WS/recon/data/.autopilot.pid"
+  clear
+  title_box " 🚀 AUTOPILOT " "One switch — target-pick, scan, next-target, all automatic"
+  echo ""
+  local running=0 pid=""
+  if [ -f "$pid_file" ]; then
+    pid="$(cat "$pid_file" 2>/dev/null)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      running=1
+    fi
+  fi
+
+  if [ "$running" -eq 1 ]; then
+    echo "${P}  ${GREEN}● Autopilot is ON${R} ${MUTED}(PID: $pid)${R}"
+    echo "${P}  ${MUTED}Log: tail -f $WS/.autopilot.log${R}"
+    echo ""
+    echo "${P}  [1] Turn OFF   [0] Back"
+    local c
+    read -r -p "${P}  Choice: " c
+    if [ "$c" = "1" ]; then
+      kill "$pid" 2>/dev/null
+      rm -f "$pid_file"
+      echo "${P}  ${GOLD}Autopilot turned OFF.${R}"
+      sleep 1
+    fi
+  else
+    echo "${P}  ${MUTED}Abhi OFF hai. ON karne par ye khud-ba-khud karega:${R}"
+    echo "${P}    1. Tumhare PC ki capability check karega (CPU/RAM) — safe settings khud chunega"
+    echo "${P}    2. Ek fresh/kam-crowded bounty-program dhoondega (jo abhi tak set up nahi hai)"
+    echo "${P}    3. Uska folder/scope khud banayega"
+    echo "${P}    4. Poora recon+scan+verify hunt khud chalayega"
+    echo "${P}    5. Khatam hone par agla fresh-program khud uthayega — repeat, jab tak OFF na karo"
+    echo ""
+    echo "${P}  ${GOLD}⚠ Ye account ka daily-scan-limit/trial khud respect karta hai${R} ${MUTED}—"
+    echo "${P}  agar quota khatam ho jaye, khud ruk jayega aur wajah batayega.${R}"
+    echo ""
+    echo "${P}  [1] Turn ON   [0] Back"
+    local c
+    read -r -p "${P}  Choice: " c
+    if [ "$c" = "1" ]; then
+      nohup python3 "$WS/recon/autopilot.py" > "$WS/.autopilot.log" 2>&1 &
+      local new_pid=$!
+      disown 2>/dev/null || true
+      mkdir -p "$(dirname "$pid_file")"
+      echo "$new_pid" > "$pid_file"
+      echo "${P}  ${GREEN}✓ Autopilot ON (PID: $new_pid).${R} ${MUTED}Log: $WS/.autopilot.log${R}"
+      sleep 1
+    fi
+  fi
+}
+
+# =============================================================================
 # Background job status — what's actually running right now, across all programs.
 # Useful for long scope.yaml wildcard scopes where recon/scanning can run for hours.
 # =============================================================================
@@ -398,9 +506,9 @@ setup_auth_credentials() {
   echo "${P}    whatever your browser's DevTools \"Network\" tab shows for that header"
   echo "${P}    on a request you make while logged in as your test account)${R}"
   local header_value
-  read -r -p "${P}  Value: " header_value
-  if [ -z "$header_value" ]; then
-    echo "${P}  ${RED}Value khali hai — cancel kar raha hoon.${R}"; sleep 2; return
+  read -r -p "${P}  Value (or 0 to cancel): " header_value
+  if [ -z "$header_value" ] || [ "$header_value" = "0" ]; then
+    echo "${P}  ${MUTED}Cancelled — nothing saved.${R}"; sleep 1; return
   fi
 
   mkdir -p "$tdir"
@@ -415,6 +523,153 @@ AUTHEOF
   echo "${P}  ${GREEN}✓ Saved to $auth_file (chmod 600, gitignored).${R}"
   echo "${P}  ${MUTED}Next time you run auto_hunter.py (standalone, or via [A]/[F]) for"
   echo "${P}  '$target', it will print '🔑 Authenticated IDOR heuristic ENABLED'.${R}"
+  echo ""
+  sep
+  read -r -p "${P}  Press Enter to continue... " _
+}
+
+# =============================================================================
+# HackerOne API credentials wizard — writes <workspace>/.env.h1, read by
+# recon/h1_client.py's get_auth_headers(). This is YOUR OWN H1 account, used
+# to discover/sync programs you're already authorized on (bring-your-own-key —
+# separate from the product's own login in .env.account, see setup_account()).
+# =============================================================================
+setup_h1_credentials() {
+  local env_file="$WS/.env.h1"
+  clear
+  title_box " 🔑 HACKERONE API CREDENTIALS " "Your own H1 account — used to sync authorized programs"
+  echo ""
+  if [ -f "$env_file" ] && grep -q "H1_API_TOKEN" "$env_file" 2>/dev/null; then
+    echo "${P}  ${GREEN}Credentials already saved.${R} Testing...${R}"
+    # shellcheck disable=SC1090
+    source "$env_file"
+    python3 "$WS/recon/h1_client.py" --test-auth 2>/dev/null
+    echo ""
+    echo "${P}  [1] Replace them   [0] Keep and go back"
+    local rep
+    read -r -p "${P}  Choice: " rep
+    [ "$rep" != "1" ] && return
+    echo ""
+  fi
+
+  echo "${P}  ${MUTED}Get an API token: https://hackerone.com/settings/api_token${R}"
+  echo "${P}  ${MUTED}(needs your H1 username too — visible in your profile URL)${R}"
+  echo ""
+  local h1_user h1_token
+  read -r -p "${P}  H1 username (or 0 to cancel): " h1_user
+  if [ -z "$h1_user" ] || [ "$h1_user" = "0" ]; then
+    echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; return
+  fi
+  read -r -p "${P}  H1 API token (or 0 to cancel): " h1_token
+  if [ -z "$h1_token" ] || [ "$h1_token" = "0" ]; then
+    echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; return
+  fi
+
+  cat > "$env_file" <<H1EOF
+# HackerOne API credentials — your own account, used by recon/h1_client.py
+# to discover/sync programs you're authorized on. Never committed (.gitignore: **/.env.*).
+export H1_USERNAME="$h1_user"
+export H1_API_TOKEN="$h1_token"
+H1EOF
+  chmod 600 "$env_file"
+  export H1_USERNAME="$h1_user" H1_API_TOKEN="$h1_token"
+  echo ""
+  echo "${P}  ${GREEN}✓ Saved.${R} Testing authentication..."
+  python3 "$WS/recon/h1_client.py" --test-auth
+  echo ""
+  sep
+  read -r -p "${P}  Press Enter to continue... " _
+}
+
+# =============================================================================
+# WPScan API token — a global (not per-program) credential that enables
+# recon/scanner.py's auto-triggered wpscan pass (fires whenever a program's
+# assets.json has a WordPress-tagged host — see detect_wordpress_hosts()).
+# Free tier: https://wpscan.com/register. Writes <workspace>/.env.wpscan.
+# =============================================================================
+setup_wpscan_token() {
+  local env_file="$WS/.env.wpscan"
+  clear
+  title_box " 🛡  WPSCAN API TOKEN " "Enables automated WordPress vulnerability checks"
+  echo ""
+  echo "${P}  ${MUTED}scanner.py automatically runs wpscan on any host whose recon"
+  echo "${P}  ${MUTED}data shows WordPress in its detected tech stack (any program,"
+  echo "${P}  ${MUTED}not just one) — but wpscan needs a free API token to actually"
+  echo "${P}  ${MUTED}look up known plugin/theme vulnerabilities. Without one, it"
+  echo "${P}  ${MUTED}still runs but skips the vulnerability-database lookup.${R}"
+  echo ""
+  if [ -f "$env_file" ] && grep -q "WPSCAN_API_TOKEN" "$env_file" 2>/dev/null; then
+    echo "${P}  ${GREEN}A token is already saved.${R}"
+    echo ""
+    echo "${P}  [1] Replace it   [0] Keep it and go back"
+    local rep
+    read -r -p "${P}  Choice: " rep
+    [ "$rep" != "1" ] && return
+    echo ""
+  fi
+
+  echo "${P}  ${B}Get a free token:${R} ${CYAN}https://wpscan.com/register${R}"
+  echo "${P}  ${MUTED}(free tier: 25 requests/day — plenty for occasional per-program checks)${R}"
+  echo ""
+  local token
+  read -r -p "${P}  Paste your WPScan API token (or 0 to cancel): " token
+  if [ -z "$token" ] || [ "$token" = "0" ]; then
+    echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; return
+  fi
+
+  cat > "$env_file" <<WPEOF
+# WPScan API token — used only by recon/scanner.py's auto-triggered wpscan pass
+# (detect_wordpress_hosts()/wpscan_check()). Never committed (see .gitignore: **/.env.*).
+# Free tier: https://wpscan.com/register
+export WPSCAN_API_TOKEN="$token"
+WPEOF
+  chmod 600 "$env_file"
+  echo ""
+  echo "${P}  ${GREEN}✓ Saved to $env_file (chmod 600, gitignored).${R}"
+  echo "${P}  ${MUTED}Next time scanner.py finds a WordPress-tagged host (any program),"
+  echo "${P}  it will run a real vulnerability-database lookup instead of skipping.${R}"
+  echo ""
+  sep
+  read -r -p "${P}  Press Enter to continue... " _
+}
+
+# =============================================================================
+# Account login — this product's own login (separate from HackerOne API
+# creds in .env.h1). Gates the per-day scan quota enforced in
+# recon/recon_pipeline.py's main() via recon/account_client.py.
+# Server: recon/account_server.py (run separately, see docs/FUTURE_FEATURES.md).
+# =============================================================================
+setup_account() {
+  local env_file="$WS/.env.account"
+  clear
+  title_box " 👤 ACCOUNT LOGIN " "Subscription tier & daily scan quota"
+  echo ""
+  if [ -f "$env_file" ] && grep -q "ACCOUNT_TOKEN" "$env_file" 2>/dev/null; then
+    echo "${P}  ${GREEN}Logged in already.${R} Fetching status..."
+    python3 "$WS/recon/account_client.py" --status 2>/dev/null
+    echo ""
+    echo "${P}  [1] Re-login (different account)   [0] Back"
+    local rep
+    read -r -p "${P}  Choice: " rep
+    [ "$rep" != "1" ] && return
+    echo ""
+  fi
+
+  echo "${P}  [1] Register (naya account)   [2] Login (existing account)   [0] Cancel"
+  local mode
+  read -r -p "${P}  Choice: " mode
+  [ "$mode" != "1" ] && [ "$mode" != "2" ] && { echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; return; }
+
+  local email password
+  read -r -p "${P}  Email: " email
+  [ -z "$email" ] && { echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; return; }
+  read -r -s -p "${P}  Password: " password
+  echo ""
+  [ -z "$password" ] && { echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; return; }
+
+  local flag="--login"
+  [ "$mode" = "1" ] && flag="--register"
+  python3 "$WS/recon/account_client.py" $flag --email "$email" --password "$password"
   echo ""
   sep
   read -r -p "${P}  Press Enter to continue... " _
@@ -462,6 +717,22 @@ diagnostics_check() {
     printf "%s    ${GREEN}✓${R} %-14s ${MUTED}configured (hidden)${R}\n" "$P" "H1_API_TOKEN"
   else
     printf "%s    ${GOLD}⚠${R} %-14s ${RED}not set in environment${R}\n" "$P" "H1_API_TOKEN"
+  fi
+
+  echo ""
+  echo "${P}  ${B}4. WPScan API Token (optional — enables automated WordPress checks):${R}"
+  if grep -q "WPSCAN_API_TOKEN" "$WS/.env.wpscan" 2>/dev/null; then
+    printf "%s    ${GREEN}✓${R} %-14s ${MUTED}configured (hidden)${R}\n" "$P" "WPSCAN_API_TOKEN"
+  else
+    printf "%s    ${GOLD}⚠${R} %-14s ${MUTED}not set — Main Menu [W] to configure (free: wpscan.com/register)${R}\n" "$P" "WPSCAN_API_TOKEN"
+  fi
+
+  echo ""
+  echo "${P}  ${B}5. Account (subscription / daily scan quota):${R}"
+  if grep -q "ACCOUNT_TOKEN" "$WS/.env.account" 2>/dev/null; then
+    printf "%s    ${GREEN}✓${R} %-14s ${MUTED}logged in — Main Menu [A] for status${R}\n" "$P" "Account"
+  else
+    printf "%s    ${GOLD}⚠${R} %-14s ${MUTED}not logged in — Main Menu [A] to register/login${R}\n" "$P" "Account"
   fi
 
   echo ""
@@ -968,6 +1239,130 @@ print(f'     assets.json to status==200 before running a full scan on a scope th
 # =============================================================================
 # Flow 1 — Start NEW scan (Direct HackerOne API + Filter + Provision)
 # =============================================================================
+# =============================================================================
+# Company / self-owned-domain target setup — for a user monitoring their OWN
+# infrastructure rather than a HackerOne bug-bounty program (no H1 sync).
+# There is no automated ownership-verification yet (no DNS-TXT check — see
+# docs/FUTURE_FEATURES.md) so this wizard uses a typed acknowledgment as the
+# MVP-level authorization gate, logged to the target's NOTES.md for a real
+# accountability trail. Treat this as a placeholder, not a real security control,
+# until DNS-TXT (or equivalent) verification is built.
+# =============================================================================
+setup_company_target() {
+  update_geom
+  clear
+  title_box " 🏢 COMPANY TARGET — SELF-OWNED DOMAIN " "For monitoring infrastructure you own (not a HackerOne program)"
+  echo ""
+  echo "${P}  ${MUTED}Ye mode sirf apni khud ki company/domain monitor karne ke liye hai —${R}"
+  echo "${P}  ${MUTED}HackerOne se sync nahi hota, sirf tumhare diye domains scan honge.${R}"
+  echo ""
+  local label
+  read -r -p "${P}  Company/project name (or 0 to cancel): " label
+  if [ -z "$label" ] || [ "$label" = "0" ]; then return; fi
+  local fname
+  fname="$(normalize_name "$label")"
+  if [ -z "$fname" ]; then
+    echo "${P}  ${RED}✗ Invalid name.${R}"; sleep 2; return
+  fi
+  if [ -d "$WS/$fname" ] && [ -f "$WS/$fname/scope.yaml" ]; then
+    echo ""
+    echo "${P}  ${GOLD}⚠ Target '$fname' already exists.${R}"
+    read -r -p "${P}  Usi target ka menu open karein? [Y/n]: " om
+    [[ ! "$om" =~ ^[nN]$ ]] && target_menu "$fname"
+    return
+  fi
+
+  echo ""
+  echo "${P}  ${B}Domains to monitor${R} ${MUTED}(ek-ek karke type karo, khaali line se end karo):${R}"
+  local roots=() d
+  while true; do
+    read -r -p "${P}    Domain: " d
+    [ -z "$d" ] && break
+    roots+=("$d")
+  done
+  if [ "${#roots[@]}" -eq 0 ]; then
+    echo "${P}  ${RED}✗ Koi domain nahi diya. Cancelled.${R}"; sleep 2; return
+  fi
+
+  echo ""
+  echo "${P}  ${GOLD}⚠ ZAROORI: Active scanning sirf apne authorized/owned domains par karo.${R}"
+  echo "${P}  ${MUTED}Type karo 'I OWN THESE DOMAINS' confirm karne ke liye ki upar diye${R}"
+  echo "${P}  ${MUTED}sab domains tumhare khud ke hain ya tumhe test karne ki likhit ijazat hai:${R}"
+  local ack
+  read -r -p "${P}  Confirmation: " ack
+  if [ "$ack" != "I OWN THESE DOMAINS" ]; then
+    echo "${P}  ${RED}✗ Confirmation match nahi hua. Cancelled — koi target nahi banaya.${R}"
+    sleep 2
+    return
+  fi
+
+  mkdir -p "$WS/$fname"
+  {
+    echo "# Company Target — Engagement Contract (machine-readable)"
+    echo "program:"
+    echo "  handle: \"$fname\""
+    echo "  name: \"$label\""
+    echo "  confirmed: true   # ownership acknowledged via typed confirmation, see NOTES.md"
+    echo ""
+    echo "roots:"
+    for d in "${roots[@]}"; do echo "  - $d"; done
+    echo "excluded: []"
+    echo "allowed:"
+    echo "  methods: [GET, HEAD, OPTIONS, POST]"
+    echo "  max_requests_per_minute: 60"
+    echo "  max_concurrency: 5"
+    echo "  destructive_actions: false"
+  } > "$WS/$fname/scope.yaml"
+  {
+    echo "# $label — Hunt Progress"
+    echo ""
+    echo "## Ownership acknowledgment"
+    echo "- Acknowledged by: typed 'I OWN THESE DOMAINS' at $(date -Iseconds)"
+    echo "- Domains: ${roots[*]}"
+    echo "- Note: this is a typed self-declaration, NOT an automated ownership check"
+    echo "  (no DNS-TXT verification exists yet — see docs/FUTURE_FEATURES.md)."
+  } > "$WS/$fname/NOTES.md"
+  echo "# $label — SCOPE" > "$WS/$fname/SCOPE.md"
+  echo ""
+  echo "${P}  ${GREEN}✓${R} Company target created: ${B}$fname/${R} (${#roots[@]} domain(s))"
+  echo ""
+  title_box " TARGET CONFIGURED: $fname " "Ready for scanning"
+  opt "C" "🚀 Run COMPLETE SCAN & PRE-FILL AGENT HUNT" "Recommended pipeline — ek-baar-ka scan"
+  opt "W" "🐕 Turn ON Watchdog (continuous monitoring)" "Naya asset/change dikhe to khud-ba-khud scan+notify"
+  opt "M" "🎯 Open Target Mission Control Menu"        "Target operations dashboard"
+  opt "0" "↩ Return to Main Menu"                     "Mission control home"
+  echo ""
+  sep
+  local post_act
+  read -r -p "${P}  ${B}Choice [C/W/M/0]:${R} " post_act
+  case "$post_act" in
+    [cC]*) run_complete_hunt "$fname" ;;
+    [wW]*)
+      echo ""
+      echo "${P}  ${B}Kitni der mein check kare?${R}"
+      opt "1" "15 minute" ""
+      opt "2" "1 ghanta (default)" ""
+      opt "3" "6 ghante" ""
+      opt "4" "24 ghante" ""
+      opt "5" "Custom" ""
+      local ic dsec
+      read -r -p "${P}  Choice [1-5]: " ic
+      case "$ic" in
+        1) dsec=900 ;; 3) dsec=21600 ;; 4) dsec=86400 ;;
+        5) read -r -p "${P}  Interval seconds mein: " dsec; [ -z "$dsec" ] && dsec=3600 ;;
+        *) dsec=3600 ;;
+      esac
+      nohup python3 "$WS/recon/daemon.py" --program "$fname" --interval "$dsec" > "$WS/recon/data/daemon.log" 2>&1 &
+      disown 2>/dev/null || true
+      sleep 1
+      echo "${P}  ${GREEN}✓ Watchdog ON for '$fname' (har ${dsec}s check karega).${R}"
+      sleep 2
+      ;;
+    [mM]*) target_menu "$fname" ;;
+    *) return ;;
+  esac
+}
+
 new_scan_manual() {
   update_geom
   clear
@@ -1054,14 +1449,19 @@ new_scan() {
     opt "2" "🌐 All Programs (Paid + VDP)"   "bounty programs + vulnerability disclosure"
     opt "3" "🎯 Manual Program Handle"      "type any handle e.g. shopify, gitlab, uber"
     opt "4" "🌱 Find Newer/Less-Crowded Programs" "sorted by newest-on-HackerOne first"
+    opt "5" "🏢 Company — Monitor Own Domain"    "no HackerOne program — for companies scanning their own infra"
     opt "0" "↩ Back to Main Menu"           "return to mission control"
     echo ""
     sep
     local s_mode
-    read -r -p "${P}  ${B}Select Scan Type [0-4, or B to return]:${R} " s_mode
+    read -r -p "${P}  ${B}Select Scan Type [0-5, or B to return]:${R} " s_mode
 
     case "$s_mode" in
       0|[bB]*|[qQ]*)
+        return
+        ;;
+      5)
+        setup_company_target
         return
         ;;
       1|2|4)
@@ -1079,15 +1479,16 @@ new_scan() {
         if [ -z "${H1_USERNAME:-}" ] || [ -z "${H1_API_TOKEN:-}" ]; then
           echo ""
           echo "${P}  ${RED}⚠ H1_USERNAME ya H1_API_TOKEN set nahi hain.${R}"
-          echo "${P}  ${MUTED}Auto-discovery ke liye credentials zaroori hain:${R}"
-          echo "${P}    export H1_USERNAME=\"...\" && export H1_API_TOKEN=\"...\""
+          echo "${P}  ${MUTED}Auto-discovery ke liye credentials zaroori hain.${R}"
           echo ""
-          read -r -p "${P}  Manual handle enter karna chahte hain? [Y/n]: " mh
-          if [[ ! "$mh" =~ ^[nN]$ ]]; then
-            new_scan_manual
-            return
-          fi
-          continue
+          echo "${P}  [1] Ab set karo (wizard)   [2] Manual handle enter karo   [0] Cancel"
+          local mh
+          read -r -p "${P}  Choice: " mh
+          case "$mh" in
+            1) setup_h1_credentials; continue ;;
+            2) new_scan_manual; return ;;
+            *) continue ;;
+          esac
         fi
 
         echo ""
@@ -1245,15 +1646,15 @@ splash() {
   clear
   echo ""
   center_block "
-  ██████╗ ██╗   ██╗ ██████╗     ██████╗  ██████╗ ██╗   ██╗███╗   ██╗████████╗██╗   ██╗
-  ██╔══██╗██║   ██║██╔════╝     ██╔══██╗██╔═══██╗██║   ██║████╗  ██║╚══██╔══╝╚██╗ ██╔╝
-  ██████╔╝██║   ██║██║  ███╗    ██████╔╝██║   ██║██║   ██║██╔██╗ ██║   ██║    ╚████╔╝ 
-  ██╔══██╗██║   ██║██║   ██║    ██╔══██╗██║   ██║██║   ██║██║╚██╗██║   ██║     ╚██╔╝  
-  ██████╔╝╚██████╔╝╚██████╔╝    ██████╔╝╚██████╔╝╚██████╔╝██║ ╚████║   ██║      ██║   
-  ╚═════╝  ╚═════╝  ╚═════╝     ╚═════╝  ╚═════╝  ╚═════╝ ╚═╝  ╚═══╝   ╚═╝      ╚═╝   
+  ████████╗██████╗ ██╗ █████╗  ██████╗ ███████╗██████╗ ██╗██╗      ██████╗ ████████╗
+  ╚══██╔══╝██╔══██╗██║██╔══██╗██╔════╝ ██╔════╝██╔══██╗██║██║     ██╔═══██╗╚══██╔══╝
+     ██║   ██████╔╝██║███████║██║  ███╗█████╗  ██████╔╝██║██║     ██║   ██║   ██║
+     ██║   ██╔══██╗██║██╔══██║██║   ██║██╔══╝  ██╔═══╝ ██║██║     ██║   ██║   ██║
+     ██║   ██║  ██║██║██║  ██║╚██████╔╝███████╗██║     ██║███████╗╚██████╔╝   ██║
+     ╚═╝   ╚═╝  ╚═╝╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝     ╚═╝╚══════╝ ╚═════╝    ╚═╝
 " "${CYAN}"
   echo ""
-  center "${B}${CYAN}MISSION CONTROL — AUTONOMOUS BUG BOUNTY SUITE${R}"
+  center "${B}${GOLD}v1.0.0${R} ${MUTED}—${R} ${B}${CYAN}MISSION CONTROL — AUTONOMOUS BUG BOUNTY SUITE${R}"
   echo ""
   center "${MUTED}Workspace:${R}  $WS"
   center "${MUTED}Targets:${R}    $(existing_targets | grep -c .) active"
@@ -1271,18 +1672,46 @@ splash() {
 # =============================================================================
 # Continuous Recon Daemon Menu
 # =============================================================================
+# =============================================================================
+# Watchdog — continuous monitoring for one site (company mode ya HackerOne
+# program dono ke liye). Real engine: recon/daemon.py (delta-detect: naya
+# subdomain/endpoint dikhe to khud scan+verify+notify karta hai).
+# =============================================================================
+_watchdog_pick_target() {
+  # Prints the chosen target handle to stdout, or nothing if cancelled.
+  # Lists existing target-folders (numbered) so nothing is hardcoded/assumed.
+  local targets=() t n=0
+  while IFS= read -r t; do
+    [ -z "$t" ] && continue
+    n=$((n+1))
+    targets+=("$t")
+    echo "${P}    ${GREEN}${n}${R}  $t" >&2
+  done < <(existing_targets)
+  echo "${P}    ${MUTED}(ya naya handle type karo)${R}" >&2
+  echo "" >&2
+  local pick
+  read -r -p "${P}  Target [number ya handle, 0 to cancel]: " pick >&2
+  [ -z "$pick" ] || [ "$pick" = "0" ] && return 1
+  if [[ "$pick" =~ ^[0-9]+$ ]] && [ "$pick" -ge 1 ] && [ "$pick" -le "$n" ]; then
+    echo "${targets[$((pick-1))]}"
+  else
+    echo "$pick"
+  fi
+  return 0
+}
+
 daemon_menu() {
   while true; do
     update_geom
     clear
-    title_box " 🔄 CONTINUOUS RECON DAEMON " "Delta Watcher & Background Monitor"
+    title_box " 🐕 WATCHDOG — SITE MONITORING " "Apna site daalo, monitoring khud chalti rahegi"
     echo ""
     echo "${P}  Status: $(python3 "$WS/recon/daemon.py" --status)"
     echo ""
     sep
-    opt "1" "Run Single Delta Cycle (Immediate)" "Check for new assets once and exit"
-    opt "2" "Start Daemon Loop (1 hour interval)" "Continuously monitors in background"
-    opt "3" "Stop Running Daemon"                "Terminate background monitor process"
+    opt "1" "Turn ON Watchdog (choose interval)" "Continuously monitor ek site — naya asset dikhe to auto-scan+notify"
+    opt "2" "Run Single Check Now (no loop)"     "Ek baar delta-check karo, exit ho jao"
+    opt "3" "Turn OFF Watchdog"                  "Terminate background monitor process"
     opt "0" "↩ Return to Main Menu"              "Back to Mission Control"
     echo ""
     sep
@@ -1291,24 +1720,43 @@ daemon_menu() {
     case "$dc" in
       1)
         echo ""
-        read -r -p "${P}  Target handle [default: wordpress]: " dt
-        [ -z "$dt" ] && dt="wordpress"
+        echo "${P}  ${B}Kaunsa site monitor karna hai?${R}"
+        local dt
+        dt="$(_watchdog_pick_target)" || { echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; continue; }
+        [ -z "$dt" ] && { echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; continue; }
+        echo ""
+        echo "${P}  ${B}Kitni der mein check kare?${R}"
+        opt "1" "15 minute"  "Bahut frequent — chhote site ke liye"
+        opt "2" "1 ghanta"   "Default, zyada tools ke liye reasonable"
+        opt "3" "6 ghante"   "Kam-frequent, kam load"
+        opt "4" "24 ghante"  "Din mein ek baar"
+        opt "5" "Custom (seconds mein type karo)" ""
+        local ic dsec
+        read -r -p "${P}  Choice [1-5]: " ic
+        case "$ic" in
+          1) dsec=900 ;;
+          2) dsec=3600 ;;
+          3) dsec=21600 ;;
+          4) dsec=86400 ;;
+          5) read -r -p "${P}  Interval seconds mein: " dsec; [ -z "$dsec" ] && dsec=3600 ;;
+          *) dsec=3600 ;;
+        esac
+        nohup python3 "$WS/recon/daemon.py" --program "$dt" --interval "$dsec" > "$WS/recon/data/daemon.log" 2>&1 &
+        disown 2>/dev/null || true
+        sleep 1
+        echo "${P}  ${GREEN}✓ Watchdog ON for '$dt' (har ${dsec}s check karega).${R}"
+        python3 "$WS/recon/daemon.py" --status
+        sleep 2
+        ;;
+      2)
+        echo ""
+        local dt
+        dt="$(_watchdog_pick_target)" || { echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; continue; }
+        [ -z "$dt" ] && { echo "${P}  ${MUTED}Cancelled.${R}"; sleep 1; continue; }
         python3 "$WS/recon/daemon.py" --program "$dt" --once
         echo ""
         sep
         read -r -p "${P}  Press Enter to continue..." _
-        ;;
-      2)
-        echo ""
-        read -r -p "${P}  Target handle [default: wordpress]: " dt
-        [ -z "$dt" ] && dt="wordpress"
-        read -r -p "${P}  Interval in seconds [default: 3600]: " dsec
-        [ -z "$dsec" ] && dsec=3600
-        nohup python3 "$WS/recon/daemon.py" --program "$dt" --interval "$dsec" > "$WS/recon/data/daemon.log" 2>&1 &
-        sleep 1
-        echo "${P}  ${GREEN}✓ Daemon launched in background.${R}"
-        python3 "$WS/recon/daemon.py" --status
-        sleep 2
         ;;
       3)
         echo ""
@@ -1327,16 +1775,86 @@ daemon_menu() {
 # =============================================================================
 # Main Menu
 # =============================================================================
+account_status_line() {
+  local raw
+  raw=$(python3 "$WS/recon/account_client.py" --status-line 2>/dev/null)
+  case "$raw" in
+    NOT_LOGGED_IN)
+      echo "${GOLD}⚠ Not logged in${R} ${MUTED}— Main Menu [A] se account banao/login karo${R}" ;;
+    ERROR\|*)
+      echo "${MUTED}Account status unavailable (${raw#ERROR|})${R}" ;;
+    *\|*\|*)
+      local email tier remaining trial_info
+      IFS='|' read -r email tier remaining trial_info <<< "$raw"
+      local trial_suffix=""
+      if [ -n "$trial_info" ]; then
+        trial_suffix=" ${GOLD}[$trial_info]${R}"
+      fi
+      echo "${GREEN}✓${R} ${B}$email${R} ${MUTED}| $tier tier | $remaining scans left today${R}${trial_suffix}" ;;
+    *)
+      echo "${MUTED}Account status unavailable${R}" ;;
+  esac
+}
+
+# =============================================================================
+# First-run onboarding — triggers once (no .env.account yet) before the main
+# menu, so a brand-new user (or company) doesn't land on an empty menu with no
+# guidance. Fully skippable at every step; never runs for --auto/--daemon
+# non-interactive invocations (see bottom of file).
+# =============================================================================
+onboarding_wizard() {
+  [ -f "$WS/.env.account" ] && return
+  clear
+  title_box " 👋 WELCOME — FIRST-TIME SETUP " "Takes about 2 minutes, skippable anytime"
+  echo ""
+  echo "${P}  ${B}Kaun use kar raha hai?${R}"
+  opt "1" "🎯 Individual bug-bounty hunter" "HackerOne programs par hunt karna hai"
+  opt "2" "🏢 Company — apna domain monitor karna hai" "apni khud ki infra scan karni hai, no HackerOne"
+  opt "0" "⏭  Skip abhi ke liye" "Main Menu se baad mein kabhi bhi [A]/[H] se setup kar sakte ho"
+  echo ""
+  sep
+  local wtype
+  read -r -p "${P}  Choice: " wtype
+  [ "$wtype" != "1" ] && [ "$wtype" != "2" ] && return
+
+  echo ""
+  echo "${P}  ${B}Step 1/2 — Account (login/subscription)${R}"
+  setup_account
+  [ ! -f "$WS/.env.account" ] && return   # user cancelled account setup — stop here
+
+  case "$wtype" in
+    1)
+      echo ""
+      echo "${P}  ${B}Step 2/2 — Tumhara HackerOne account${R}"
+      setup_h1_credentials
+      echo ""
+      read -r -p "${P}  Ab pehla program dhoondhna shuru karein? [Y/n]: " go
+      [[ ! "$go" =~ ^[nN]$ ]] && new_scan
+      ;;
+    2)
+      echo ""
+      echo "${P}  ${B}Step 2/2 — Apna pehla domain add karo${R}"
+      setup_company_target
+      ;;
+  esac
+}
+
 main_menu() {
   while true; do
     update_geom
     clear
-    title_box " ⚡ BUG BOUNTY — MISSION CONTROL " "HackerOne Hunting & Attack Surface Suite"
+    title_box " ⚡ TRIAGEPILOT — MISSION CONTROL " "HackerOne Hunting & Attack Surface Suite  ·  v1.0.0"
+    echo ""
+    echo "${P}  $(account_status_line)"
     echo ""
     echo "${P}  ${B}Mission Actions:${R}"
     opt "N" "⚡ Start NEW Scan"          "discover new HackerOne targets (Cash Bounty / All)"
-    opt "M" "🔄 Continuous Recon Daemon" "background delta watcher & automated alerting"
+    opt "P" "🚀 Autopilot (ON/OFF)"      "auto-pick target, auto-scan, auto-next — one switch"
+    opt "M" "🐕 Watchdog (site monitoring)" "apna site daalo, continuously monitor hota rahega — interval-configurable"
     opt "T" "📱 Telegram & Phone Alerts" "pair phone number & setup telegram notifications"
+    opt "H" "🔑 HackerOne API Credentials" "your own H1 account — needed to auto-discover programs"
+    opt "W" "🛡  WPScan API Token"       "enables automated WordPress vulnerability checks"
+    opt "A" "👤 Account (login/status)"  "subscription tier & daily scan quota"
     opt "D" "🔍 System Diagnostics"      "tools, APIs, Docker & environment audit"
     opt "V" "📊 Dashboard (all targets)" "candidates, verified findings, last run — one screen"
     opt "J" "⚙  Background Jobs"         "what's actually running right now"
@@ -1359,12 +1877,16 @@ main_menu() {
     echo ""
     sep
     local choice
-    read -r -p "${P}  ${B}Select Target [1-$n] or Action [N/M/T/D/V/J/Q]:${R} " choice
+    read -r -p "${P}  ${B}Select Target [1-$n] or Action [N/P/M/T/H/W/A/D/V/J/Q]:${R} " choice
 
     case "$choice" in
       [nN]*) new_scan ;;
+      [pP]*) autopilot_menu ;;
       [mM]*) daemon_menu ;;
       [tT]*) python3 "$WS/recon/notify.py" --setup-telegram ;;
+      [hH]*) setup_h1_credentials ;;
+      [wW]*) setup_wpscan_token ;;
+      [aA]*) setup_account ;;
       [dD]*) diagnostics_check ;;
       [vV]*) show_dashboard ;;
       [jJ]*) show_background_jobs ;;
@@ -1402,5 +1924,6 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     exit 0
   fi
   splash
+  onboarding_wizard
   main_menu
 fi

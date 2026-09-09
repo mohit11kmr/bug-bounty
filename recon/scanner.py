@@ -329,6 +329,176 @@ def ffuf_check(program: str, scope: dict, host: str, wordlist: str, dry: bool) -
         print(f"[scanner] ffuf output -> {out.relative_to(BASE)}")
 
 
+# =============================================================================
+# WordPress-specific scanning (wpscan) — IF/ELIF auto-trigger, added per
+# docs/FUTURE_FEATURES.md #2. Fires automatically when recon's own httpx
+# -tech-detect already tagged a host as WordPress (assets.json's `technologies`
+# field) — no new discovery step, just reusing data already collected. Needs a
+# free WPSCAN_API_TOKEN (wpscan.com/register) for real vulnerability-database
+# lookups; gracefully skips (does not crash the scan) if that's not configured.
+# =============================================================================
+WPSCAN_TIMEOUT = int(os.environ.get("WPSCAN_TIMEOUT", "120"))       # seconds, per host
+WPSCAN_MAX_HOSTS = int(os.environ.get("WPSCAN_MAX_HOSTS", "5"))     # cap per run — avoid an unbounded multi-hour surprise
+
+
+def load_wpscan_env() -> None:
+    """Load WPSCAN_API_TOKEN from .env.wpscan (or .env.h1, as a shared-credentials
+    fallback) if it isn't already in the environment. Mirrors notify.py's
+    load_notify_env() — self-contained, so scanner.py works standalone (not just
+    when launched via start-bugbounty.sh, which also sources these at startup)."""
+    if os.environ.get("WPSCAN_API_TOKEN", "").strip():
+        return
+    for env_path in (BASE / ".env.wpscan", BASE / ".env.h1"):
+        if not env_path.exists():
+            continue
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip().replace("export ", "").strip()
+            v = v.strip().strip('"').strip("'")
+            if k == "WPSCAN_API_TOKEN" and v:
+                os.environ[k] = v
+                return
+
+
+def detect_wordpress_hosts(program: str) -> list[str]:
+    """The 'IF' condition: any asset whose httpx tech-detect tagged it as WordPress.
+    Pure read of already-collected recon.data/<program>/assets.json — no network call."""
+    assets_file = RECON / "data" / program / "assets.json"
+    if not assets_file.exists():
+        return []
+    try:
+        assets = json.loads(assets_file.read_text())
+    except Exception:
+        return []
+    hosts = set()
+    for a in assets:
+        techs = a.get("technologies") or []
+        if any("wordpress" in str(t).lower() for t in techs):
+            host = a.get("host") or ""
+            if host:
+                hosts.add(host)
+    return sorted(hosts)
+
+
+def wpscan_check(program: str, host: str, dry: bool) -> Path | None:
+    """Run wpscan (plugin/theme/timthumb vulnerability enumeration, no brute force)
+    against one WordPress-tagged host. Returns the output file path, or None if
+    skipped/dry-run/failed."""
+    if not os.environ.get("WPSCAN_API_TOKEN", "").strip():
+        print(f"[scanner] ⚠ wpscan: WPSCAN_API_TOKEN not set — skipping '{host}' "
+              f"(free token: https://wpscan.com/register — set it up via the launcher's "
+              f"Main Menu → [W] WPScan API Token, or manually in {BASE / '.env.wpscan'})")
+        return None
+
+    stamp = date.today().isoformat()
+    host_safe = host.replace(":", "_").replace("/", "_").replace(".", "_")
+    scan_dir(program)  # ensure evidence/scans/<program>/ exists
+    # Relative to BASE, not absolute: the `wpscan` wrapper mounts $PWD as /wpscan
+    # inside its Docker container, so an absolute host path is invisible to it —
+    # we run this subprocess with cwd=BASE (below) so this path resolves inside.
+    rel_out = Path("evidence") / "scans" / program / f"wpscan_{host_safe}_{stamp}.json"
+    url = host if host.startswith("http") else f"https://{host}"
+    cmd = [
+        "wpscan", "--url", url,
+        "--enumerate", "vp,vt,tt",   # vulnerable plugins/themes + timthumbs only — no brute force
+        "--random-user-agent",
+        "--request-timeout", "10",
+        "-f", "json", "-o", str(rel_out),
+    ]
+    print(f"[scanner] $ {' '.join(cmd)}  (cwd={BASE})")
+    if dry:
+        return None
+    try:
+        r = subprocess.run(cmd, cwd=str(BASE), capture_output=True, text=True, timeout=WPSCAN_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(f"[scanner] ! wpscan timed out on '{host}' after {WPSCAN_TIMEOUT}s")
+        return None
+    if r.returncode not in (0, 4, 5):
+        print(f"[scanner] ! wpscan exit={r.returncode}: {r.stderr[-300:]}")
+    out_path = BASE / rel_out
+    return out_path if out_path.exists() else None
+
+
+def import_wpscan_findings(out_json: Path, program: str) -> int:
+    """Parse wpscan JSON -> candidate_findings, same provenance model as
+    import_nuclei_findings (tool='wpscan', its own run_id). A plain 'scan_aborted'
+    (e.g. missing API token) inserts nothing — never fabricate a finding."""
+    try:
+        data = json.loads(out_json.read_text())
+    except Exception as e:
+        print(f"[scanner] ! could not parse {out_json.name}: {e}")
+        return 0
+
+    if data.get("scan_aborted"):
+        print(f"[scanner] wpscan aborted for {data.get('target_url', '?')}: {data['scan_aborted']}")
+        return 0
+
+    target_url = data.get("target_url", "")
+    host = urllib.parse.urlparse(target_url).netloc or target_url
+
+    def _walk_vulns(node, context=""):
+        """wpscan nests vulnerabilities differently per enumeration mode
+        (core/plugins/themes) — walk generically rather than hardcode one shape."""
+        found = []
+        if isinstance(node, dict):
+            if isinstance(node.get("vulnerabilities"), list):
+                for v in node["vulnerabilities"]:
+                    found.append((context, v))
+            for k, v in node.items():
+                found.extend(_walk_vulns(v, context or str(k)))
+        elif isinstance(node, list):
+            for item in node:
+                found.extend(_walk_vulns(item, context))
+        return found
+
+    vulns = _walk_vulns(data)
+    if not vulns:
+        print(f"[scanner] wpscan: 0 known vulnerabilities found for {host}")
+        return 0
+
+    db_path = RECON / "data" / program / "recon.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = sqlite3.connect(db_path)
+    cur = con.cursor()
+    cur.execute("""CREATE TABLE IF NOT EXISTS candidate_findings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        url TEXT, host TEXT, method TEXT,
+        tag TEXT, score INTEGER, status TEXT DEFAULT 'TRIAGED',
+        confidence REAL DEFAULT 0.0,
+        tool TEXT DEFAULT 'wpscan',
+        run_id TEXT DEFAULT 'legacy',
+        notes TEXT DEFAULT '',
+        created_at TEXT, updated_at TEXT,
+        UNIQUE(url, tag));""")
+    cols = [c[1] for c in cur.execute("PRAGMA table_info(candidate_findings)").fetchall()]
+    if "run_id" not in cols:
+        cur.execute("ALTER TABLE candidate_findings ADD COLUMN run_id TEXT DEFAULT 'legacy'")
+    if "tool" not in cols:
+        cur.execute("ALTER TABLE candidate_findings ADD COLUMN tool TEXT DEFAULT 'heuristic'")
+
+    scan_run_id = f"run_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
+    now = date.today().isoformat()
+    inserted = 0
+    for context, v in vulns:
+        title = v.get("title", "unknown") if isinstance(v, dict) else str(v)
+        tag = f"vuln_wpscan_{context or 'core'}"[:60]
+        notes = f"wpscan: {title}"
+        cur.execute(
+            "INSERT INTO candidate_findings (url,host,method,tag,score,status,confidence,tool,run_id,created_at,updated_at,notes) "
+            "VALUES (?,?,?,?,?,'TRIAGED',?,'wpscan',?,?,?,?) "
+            "ON CONFLICT(url, tag) DO UPDATE SET run_id=excluded.run_id, updated_at=excluded.updated_at",
+            (target_url, host, "GET", tag, 70, 0.6, scan_run_id, now, now, notes),
+        )
+        inserted += 1
+    con.commit()
+    con.close()
+    print(f"[scanner] wpscan: {inserted} known-vulnerability hit(s) for {host} -> candidate_findings")
+    return inserted
+
+
 def _selfcheck() -> None:
     print("[scanner] Running selfcheck...")
     mock_scope = {
@@ -361,6 +531,8 @@ def main() -> None:
     ap.add_argument("--run-on", default=DEFAULT_RUN_ON,
                     help="live|all|list:h1,h2 — nuclei targets kya ho")
     ap.add_argument("--no-nuclei", action="store_true")
+    ap.add_argument("--no-wpscan", action="store_true",
+                     help="skip the auto-triggered wpscan pass on WordPress-tagged hosts")
     ap.add_argument("--ffuf-host")
     ap.add_argument("--ffuf-wordlist")
     ap.add_argument("--selfcheck", action="store_true", help="run internal selfcheck")
@@ -373,6 +545,7 @@ def main() -> None:
     if not args.program:
         sys.exit("[scanner] Error: --program is required (unless running --selfcheck).")
 
+    load_wpscan_env()
     scope = load_scope(args.program)
     targets = collect_scan_targets(args.program, scope)
     print(f"[scanner] program={args.program} valid in-scope targets={len(targets)}")
@@ -385,6 +558,17 @@ def main() -> None:
         out = nuclei_scan(args.program, scope, targets, args.dry_run, args.run_on)
         if out and not args.dry_run:
             import_nuclei_findings(out, args.program)
+
+    if not args.no_wpscan:
+        wp_hosts = detect_wordpress_hosts(args.program)
+        if wp_hosts:
+            capped = wp_hosts[:WPSCAN_MAX_HOSTS]
+            note = "" if len(wp_hosts) == len(capped) else f" (capped from {len(wp_hosts)}, set WPSCAN_MAX_HOSTS to raise)"
+            print(f"[scanner] 🔍 wpscan auto-trigger: {len(capped)} WordPress-tagged host(s){note}")
+            for h in capped:
+                out = wpscan_check(args.program, h, args.dry_run)
+                if out and not args.dry_run:
+                    import_wpscan_findings(out, args.program)
 
     if args.ffuf_host:
         filt = make_scope_filter(scope)

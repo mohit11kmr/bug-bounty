@@ -376,6 +376,16 @@ def main() -> None:
         _selfcheck()
         return
 
+    try:
+        import account_client
+        allowed, msg = account_client.check_scan_allowed()
+        log(f"[account] {msg}")
+        if not allowed:
+            log("Scan blocked by account/subscription gate. Exiting.")
+            sys.exit(1)
+    except ImportError:
+        pass  # account_client not importable (e.g. run from outside recon/) — don't block scanning on it
+
     check_tools(skip_endpoints=args.skip_endpoints)
     program_dir = BASE / args.program
     scope = load_scope(program_dir)

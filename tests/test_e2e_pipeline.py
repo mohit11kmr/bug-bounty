@@ -62,6 +62,30 @@ class MockSecurityServerHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b"APP_KEY=base64:mocksecretkey1234567890=\nDB_PASSWORD=supersecret_pass\n")
 
+        # 5. Real login form (has an actual password input field) — SHOULD be VERIFIED
+        elif self.path == "/admin/login":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(
+                b"<html><body><h1>Admin Sign In</h1><form>"
+                b"<input type='text' name='username'>"
+                b"<input type='password' name='password'>"
+                b"<button>Log In</button></form></body></html>"
+            )
+
+        # 6. Normal page with just a "Login" link in its nav bar, no actual
+        #    password field — SHOULD NOT be verified (this is the exact false
+        #    positive pattern found on a real Flipkart/Myntra product page).
+        elif self.path == "/product/some-item":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(
+                b"<html><body><nav><a href='/login'>Login</a></nav>"
+                b"<h1>Some Product</h1><p>Buy now for $9.99</p></body></html>"
+            )
+
         # 4. Dead endpoint
         elif self.path == "/404-dead":
             self.send_response(404)
@@ -173,6 +197,35 @@ class TestE2EPipeline(unittest.TestCase):
         self.assertIsNotNone(env_result)
         self.assertEqual(env_result["status"], "VERIFIED")
         self.assertIn("env_file", env_result["notes"])
+
+    def test_04b_admin_auth_panel_requires_real_password_field(self):
+        """Regression test for a real false positive found 2026-09-09: a normal
+        product page with a 'Login' nav link was auto-VERIFIED as an exposed
+        admin/auth surface just because the word 'login' appeared anywhere in
+        the page body. The check now requires an actual password <input> field."""
+        is_in_scope = auto_hunter.make_scope_filter(self.scope)
+
+        # A. Real login form (has a password field) -> MUST verify
+        real_login_cand = {
+            "url": f"http://127.0.0.1:{self.port}/admin/login",
+            "tag": "admin_internal",
+            "score": 60,
+        }
+        real_result = auto_hunter.verify_candidate(real_login_cand, is_in_scope)
+        self.assertIsNotNone(real_result, "Real login form with password field should be VERIFIED")
+        self.assertEqual(real_result["status"], "VERIFIED")
+
+        # B. Normal product page with only a nav-bar Login link -> MUST NOT verify
+        normal_page_cand = {
+            "url": f"http://127.0.0.1:{self.port}/product/some-item",
+            "tag": "auth",
+            "score": 50,
+        }
+        normal_result = auto_hunter.verify_candidate(normal_page_cand, is_in_scope)
+        self.assertIsNone(
+            normal_result,
+            "Normal page with just a 'Login' nav link was falsely verified as an auth/admin surface!"
+        )
 
     def test_04_end_to_end_state_machine_and_report_generation(self):
         """Test candidate queue transitions and canonical report generation."""

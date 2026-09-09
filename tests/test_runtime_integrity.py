@@ -35,6 +35,8 @@ import js_miner
 import recon_pipeline
 import report_gen
 import scanner
+import account_server
+import urllib.request
 
 
 class MockTargetServerHandler(http.server.BaseHTTPRequestHandler):
@@ -79,6 +81,41 @@ class TestRuntimeIntegrity(unittest.TestCase):
         cls.data_dir = BASE / "recon" / "data" / cls.prog_name
         cls.raw_dir = cls.data_dir / "raw"
         cls.reports_dir = BASE / "evidence" / "reports" / cls.prog_name
+
+        # recon_pipeline.py now gates every real run behind account_client's
+        # subscription check (see account_client.check_scan_allowed()). Spin up
+        # a real, ephemeral account_server (same as the MockTargetServer above —
+        # no mocking) so every subprocess this test suite launches authenticates
+        # against it with an unlimited-tier test account.
+        cls.acct_db = BASE / "tests" / "_test_account_data.db"
+        cls.acct_db.unlink(missing_ok=True)
+        account_server.DB_PATH = cls.acct_db
+        account_server.ADMIN_SECRET = "test_admin_secret"
+        cls.acct_server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), account_server.AccountHandler)
+        cls.acct_port = cls.acct_server.server_port
+        cls.acct_thread = threading.Thread(target=cls.acct_server.serve_forever, daemon=True)
+        cls.acct_thread.start()
+        acct_url = f"http://127.0.0.1:{cls.acct_port}"
+
+        def _acct_post(path, body, extra_headers=None):
+            data = json.dumps(body).encode("utf-8")
+            headers = {"Content-Type": "application/json", **(extra_headers or {})}
+            req = urllib.request.Request(f"{acct_url}{path}", data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
+        reg = _acct_post("/register", {"email": "test-suite@local", "password": "test-suite-pw-123"})
+        _acct_post("/admin/set-tier", {"email": "test-suite@local", "tier": "unlimited"},
+                   extra_headers={"X-Admin-Secret": "test_admin_secret"})
+        os.environ["ACCOUNT_SERVER_URL"] = acct_url
+        os.environ["ACCOUNT_TOKEN"] = reg["token"]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.acct_server.shutdown()
+        cls.acct_db.unlink(missing_ok=True)
+        os.environ.pop("ACCOUNT_SERVER_URL", None)
+        os.environ.pop("ACCOUNT_TOKEN", None)
 
     def setUp(self):
         # Ensure fresh state before test

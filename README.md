@@ -1,3 +1,14 @@
+<img src="assets/logo.svg" alt="TriagePilot" width="420">
+
+# TriagePilot — Bug Bounty Automation & Verification Assistant
+
+**Version:** 1.0.0
+
+> Legal: [Terms of Service](legal/TERMS_OF_SERVICE.md) · [Privacy Policy](legal/PRIVACY_POLICY.md)
+> Help/Support/Donation: [SUPPORT.md](SUPPORT.md)
+
+---
+
 # Bug Bounty Workspace — README & Progress Log
 
 > Ek jagah: ye workspace kya hai, kaise use karna hai (rules), aur **hum kya kar rahe**
@@ -49,11 +60,14 @@ second opinion → report. SIRF in-scope. Koi out-of-scope/unauthorized testing 
 | `recon/js_miner.py` | Phase 2: Katana JS crawl + secret extraction → endpoints merge |
 | `recon/application_model.py` | Actors/objects/actions extractor → `application_model.json` (consumed by `@prob-hunter`, not by the Python pipeline) |
 | `recon/scanner.py` | Phase 3: safe scope-aware Nuclei/ffuf → `candidate_findings` |
-| `recon/intelligence.py` | Phase 4: deterministic candidate scoring → `candidate_report.md` + DB rebuild |
-| `recon/auto_hunter.py` | `[A]`-only: automated CORS/secret-leak/traversal verification, no human gate |
+| `recon/intelligence.py` | Thin shim → compiled `_intelligence_core*.so` (Phase 4: deterministic candidate scoring → `candidate_report.md` + DB rebuild) |
+| `recon/auto_hunter.py` | Thin shim → compiled `_auto_hunter_core*.so` (`[A]`-only: automated CORS/secret-leak/traversal verification, no human gate) |
 | `recon/report_gen.py` | Auto-generates HackerOne markdown draft on VERIFIED findings (`--sample` → quarantined to `sample/`, never mixed with real reports) |
 | `recon/notify.py` | Desktop + Telegram alert dispatch |
-| `recon/daemon.py` | Background delta-watcher — re-triggers the full chain when a new subdomain appears |
+| `recon/daemon.py` | **Watchdog** engine — background delta-watcher, re-triggers the full chain when a new subdomain appears (TUI: Main Menu `[M]`) |
+| `recon/autopilot.py` | **Autopilot** — ON/OFF loop: auto-pick fresh program → auto-setup → auto-hunt → auto-next, forever (TUI: Main Menu `[P]`) |
+| `recon/account_server.py` | Login/subscription/trial-quota gate — stdlib-only HTTP API, self-hosted |
+| `recon/account_client.py` | Talks to `account_server.py`; `recon_pipeline.py` calls this before every real scan |
 | `recon/artifact_consistency.py` | Manual diagnostic: is `recon.db` in sync with `assets.json`/`endpoints.json`, or stale? |
 | `prompts/prob_hunter_prompt.txt` | prob-hunter Bayesian depth-rank prompt (source of truth — registered agent `~/.config/opencode/agents/prob-hunter.md` reads this via `@prob-hunter`) |
 | `.opencode/skills/{triage,grilling,grill-me,handoff}` | Finding state-machine, interrogation, session handoff — used in the `[C]` path only |
