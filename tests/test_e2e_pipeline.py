@@ -227,6 +227,24 @@ class TestE2EPipeline(unittest.TestCase):
             "Normal page with just a 'Login' nav link was falsely verified as an auth/admin surface!"
         )
 
+        # C. Regression test for a real false positive found 2026-09-10: a REAL
+        # login page (genuine password field) tagged 'auth' (not 'admin_internal')
+        # was auto-VERIFIED on a live Netflix scan — but a working public login
+        # page is EXPECTED on any consumer site, not a finding. Same fixture
+        # endpoint as case A (real password field), only the tag differs — MUST
+        # NOT verify, because only 'admin_internal' is specific/suspicious enough.
+        real_login_wrong_tag_cand = {
+            "url": f"http://127.0.0.1:{self.port}/admin/login",
+            "tag": "auth",
+            "score": 55,
+        }
+        wrong_tag_result = auto_hunter.verify_candidate(real_login_wrong_tag_cand, is_in_scope)
+        self.assertIsNone(
+            wrong_tag_result,
+            "A real, working public login page (tag='auth') was falsely verified — "
+            "expected login pages are not findings, only tag='admin_internal' should auto-verify."
+        )
+
     def test_04_end_to_end_state_machine_and_report_generation(self):
         """Test candidate queue transitions and canonical report generation."""
         # 1. Initialize SQLite recon.db

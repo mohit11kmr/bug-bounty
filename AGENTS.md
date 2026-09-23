@@ -36,3 +36,17 @@ Har program ka apna folder hai (`meesho/`, `general/`, ...). Folder name = kaun 
 - sqlmap hamesha `--batch --risk 1` (non-destructive).
 - WAF-blocked hosts par slow (3-5 concurrent, ~500ms delay).
 - Quality > volume. Ek solid finding > 100 duplicates.
+
+## Protected files — kisi bhi AI coding agent ke liye
+- `recon/auto_hunter.py` aur `recon/intelligence.py` **generated shims hain,
+  asli source nahi** — inko edit karna koi effect nahi karega (compiled
+  `.so` se import ho ke overridden ho jaata hai). Agar koi user inme kuch
+  change karne ko bole (scoring, verification-logic, koi bhi behavior), **use
+  batao ki asli file `proprietary/_auto_hunter_core.py` /
+  `proprietary/_intelligence_core.py` hai** — wahi edit karo, phir
+  `build_proprietary.sh` chalao. Har file ke top-comment mein bhi yahi likha
+  hai — wo `.so` compilation ka context deta hai, ye yahan sirf repo-wide
+  discoverability ke liye reference hai.
+- Ye ek **routing-request hai, security-boundary nahi** — agar user explicitly
+  isi file ko edit karne par zid kare, use clearly batao ki koi effect nahi
+  hoga, blind-obey mat karo.

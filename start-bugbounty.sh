@@ -96,7 +96,38 @@ W=82   # Frame width
 PAD=0
 P=""
 
-update_geom() {
+_GEOM_LAST_USEC=0
+_TERM_COLS=80
+
+_term_cols_cached() {
+  # sep()/title_box()/opt()/section_hdr()/center()/center_block() each call
+  # this independently, and ONE screen redraw fires 10-30 of them back to
+  # back with nothing blocking in between. A live window-maximize doesn't
+  # send a single WINCH — the window manager animates it, firing several in
+  # quick succession. If one lands between two draw calls of the SAME frame,
+  # `tput cols` can report a DIFFERENT value mid-frame: some lines then get
+  # the old (narrower) width, others get the new (wider) one — producing the
+  # jagged "stale fragments on the left, live content shifted right" tear
+  # seen on fullscreen/resize. A whole frame's draw calls run in well under
+  # a millisecond of wall time (no I/O between them), so caching the queried
+  # value for a short window guarantees every call within one frame reuses
+  # the exact same number, while the very next frame still picks up a real
+  # resize immediately (debounce window is far shorter than a human
+  # keypress or the next loop iteration).
+  #
+  # NOTE: this sets the globals _TERM_COLS/_GEOM_LAST_USEC directly and must
+  # be invoked as a plain statement (`_term_cols_cached`), never inside
+  # `$(...)` — command substitution forks a subshell, and writes to those
+  # globals from inside one never reach back out, silently breaking the
+  # whole cache. Callers read the result from `$_TERM_COLS` afterward.
+  local now_sec now_usec now_total
+  now_sec="${EPOCHREALTIME%.*}"
+  now_usec="${EPOCHREALTIME#*.}"
+  now_total=$(( now_sec * 1000000 + 10#$now_usec ))
+  if [ "$_GEOM_LAST_USEC" -gt 0 ] && [ $(( now_total - _GEOM_LAST_USEC )) -lt 150000 ]; then
+    return
+  fi
+
   local cols=""
   # tput cols queries the terminal driver directly, so it always reflects the
   # CURRENT window size (e.g. after going fullscreen). $COLUMNS is a shell
@@ -115,6 +146,13 @@ update_geom() {
   if [ -z "$cols" ] || [ "$cols" -le 0 ] 2>/dev/null; then
     cols=80
   fi
+  _TERM_COLS="$cols"
+  _GEOM_LAST_USEC="$now_total"
+}
+
+update_geom() {
+  _term_cols_cached
+  local cols="$_TERM_COLS"
 
   if [ "$cols" -ge 96 ]; then
     W=84
@@ -130,6 +168,53 @@ update_geom() {
   P="$(printf '%*s' "$PAD" "")"
 }
 
+# Fullscreen/resize the terminal window while sitting on a menu (no keypress)
+# and nothing redrew — update_geom() only recomputes W/PAD when SOMETHING
+# calls it, and every menu screen only calls it at the top of its own loop,
+# before the blocking `read` for the next choice. A resize mid-read never
+# reached that point. Registering a real (non-empty) handler for SIGWINCH
+# makes bash's `read` builtin return early the moment the terminal reports a
+# resize — every menu loop here is `while true: update_geom; clear; draw;
+# read; case; done`, so an interrupted read just falls through to the loop's
+# next iteration and redraws with fresh geometry, with no key needed.
+trap 'update_geom' WINCH
+
+# Every screen in this script calls the plain `clear` builtin before
+# redrawing. `clear` alone repaints only the terminal's currently-visible
+# rows — on a fast resize/maximize it can race the terminal emulator's own
+# internal repaint, or leave a stray strip of the previous (narrower) frame
+# visible if the emulator hasn't finished settling into its new size yet.
+# Shadowing `clear` with a function (bash resolves a bare command name to a
+# function before PATH) upgrades every existing bare `clear` call in this
+# file for free: home the cursor, wipe the visible screen AND the
+# scrollback/saved-lines buffer (\033[3J), so no leftover glyphs from a
+# stale width can survive into the next frame.
+clear() {
+  command clear
+  printf '\033[H\033[2J\033[3J'
+}
+
+_char_len() {
+  # Locale-INDEPENDENT character (codepoint) count. NEVER use bash's own
+  # ${#var} for text that may contain multi-byte UTF-8 (the banner's
+  # box-drawing art, emoji in menu labels, em-dashes) — bash's ${#var} only
+  # counts codepoints correctly when the shell's own locale (LC_CTYPE) is
+  # UTF-8-aware. This script is launched via `exec xfce4-terminal -e ...`
+  # (see splash()/main_menu() call sites), and that spawned shell does not
+  # reliably inherit the desktop session's LANG — a real, observed case: with
+  # no/POSIX locale, ${#var} silently falls back to counting raw BYTES, so
+  # an 84-character banner line reports as 222 bytes (each block-drawing
+  # glyph is 3 bytes). That blows every center()/center_block()/title_box()
+  # padding calculation negative, which clamps to 0 and renders flush-left
+  # instead of centered — exactly the "banner won't center in fullscreen"
+  # symptom this fixes. python3 is already a hard requirement for this whole
+  # tool (checked earlier in this script) and always decodes its argv as
+  # UTF-8 regardless of the parent shell's locale (PEP 538/540 C-locale
+  # coercion — verified empirically even under `env -i`), so its len() is
+  # correct no matter what locale xfce4-terminal's shell ends up with.
+  python3 -c 'import sys; print(len(sys.argv[1]))' "$1"
+}
+
 sep() {
   update_geom
   printf "%s${LINE}%s${R}\n" "$P" "$(printf '─%.0s' $(seq 1 "$W"))"
@@ -138,20 +223,22 @@ sep() {
 title_box() {
   update_geom
   local title="$1" subtitle="${2:-}" pad pad2 inner_w=$W
-  local clean_title clean_sub
+  local clean_title clean_sub title_len sub_len
   clean_title="$(printf '%s' "$title" | sed 's/\x1b\[[0-9;]*m//g')"
-  pad=$(( (inner_w - ${#clean_title}) / 2 ))
+  title_len="$(_char_len "$clean_title")"
+  pad=$(( (inner_w - title_len) / 2 ))
   [ "$pad" -lt 0 ] && pad=0
-  local rpad=$(( inner_w - pad - ${#clean_title} ))
+  local rpad=$(( inner_w - pad - title_len ))
   [ "$rpad" -lt 0 ] && rpad=0
 
   printf "%s${BORDER}╭%s╮${R}\n" "$P" "$(printf '─%.0s' $(seq 1 "$inner_w"))"
   printf "%s${BORDER}│${R}%*s${B}${CYAN}%s${R}%*s${BORDER}│${R}\n" "$P" "$pad" "" "$title" "$rpad" ""
   if [ -n "$subtitle" ]; then
     clean_sub="$(printf '%s' "$subtitle" | sed 's/\x1b\[[0-9;]*m//g')"
-    pad2=$(( (inner_w - ${#clean_sub}) / 2 ))
+    sub_len="$(_char_len "$clean_sub")"
+    pad2=$(( (inner_w - sub_len) / 2 ))
     [ "$pad2" -lt 0 ] && pad2=0
-    local rpad2=$(( inner_w - pad2 - ${#clean_sub} ))
+    local rpad2=$(( inner_w - pad2 - sub_len ))
     [ "$rpad2" -lt 0 ] && rpad2=0
     printf "%s${BORDER}│${R}%*s${MUTED}%s${R}%*s${BORDER}│${R}\n" "$P" "$pad2" "" "$subtitle" "$rpad2" ""
   fi
@@ -166,10 +253,10 @@ opt() {
 
 center() {
   local txt="$1" w len clean
-  w="$(tput cols 2>/dev/null || true)"
-  [ -z "$w" ] || [ "$w" -le 0 ] 2>/dev/null && w="${COLUMNS:-80}"
+  _term_cols_cached
+  w="$_TERM_COLS"
   clean="$(printf '%s' "$txt" | sed 's/\x1b\[[0-9;]*m//g')"
-  len="${#clean}"
+  len="$(_char_len "$clean")"
   local ind=$(( (w - len) / 2 ))
   [ "$ind" -lt 0 ] && ind=0
   printf "%*s%s\n" "$ind" "" "$txt"
@@ -177,10 +264,10 @@ center() {
 
 center_block() {
   local block="$1" color="$2" w max=0 len line lines=()
-  w="$(tput cols 2>/dev/null || true)"
-  [ -z "$w" ] || [ "$w" -le 0 ] 2>/dev/null && w="${COLUMNS:-80}"
+  _term_cols_cached
+  w="$_TERM_COLS"
   while IFS= read -r line; do
-    len="${#line}"
+    len="$(_char_len "$line")"
     [ "$len" -gt "$max" ] && max="$len"
     lines+=("$line")
   done <<< "$block"
@@ -1643,9 +1730,25 @@ for p in data:
 # Splash Screen
 # =============================================================================
 splash() {
-  clear
-  echo ""
-  center_block "
+  local rc
+  # Unlike every menu screen (each its own `while true: update_geom; clear;
+  # draw; read; case; done` loop that naturally redraws when a WINCH-
+  # interrupted read falls through), splash() used to draw ONCE and then
+  # block on a single read. The launcher opens xfce4-terminal at a fixed
+  # --geometry=120x36 (see the desktop auto-wrap block near the top of this
+  # file); if the user maximizes/resizes the window WHILE splash is still
+  # sitting on "Press Enter..." (the common case — they see the banner, then
+  # maximize, then press Enter), the banner had already been centered for
+  # the OLD 120-column width and nothing ever redrew it for the new size —
+  # printed terminal text doesn't reflow on its own when the window grows.
+  # This loops the same way every other screen does: a WINCH interrupts the
+  # read (bash reports that as a non-zero exit status with no character
+  # captured), so it redraws at the new geometry and waits again; only an
+  # actual keypress (exit status 0) breaks out.
+  while true; do
+    clear
+    echo ""
+    center_block "
   ████████╗██████╗ ██╗ █████╗  ██████╗ ███████╗██████╗ ██╗██╗      ██████╗ ████████╗
   ╚══██╔══╝██╔══██╗██║██╔══██╗██╔════╝ ██╔════╝██╔══██╗██║██║     ██╔═══██╗╚══██╔══╝
      ██║   ██████╔╝██║███████║██║  ███╗█████╗  ██████╔╝██║██║     ██║   ██║   ██║
@@ -1653,20 +1756,31 @@ splash() {
      ██║   ██║  ██║██║██║  ██║╚██████╔╝███████╗██║     ██║███████╗╚██████╔╝   ██║
      ╚═╝   ╚═╝  ╚═╝╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝     ╚═╝╚══════╝ ╚═════╝    ╚═╝
 " "${CYAN}"
-  echo ""
-  center "${B}${GOLD}v1.0.0${R} ${MUTED}—${R} ${B}${CYAN}MISSION CONTROL — AUTONOMOUS BUG BOUNTY SUITE${R}"
-  echo ""
-  center "${MUTED}Workspace:${R}  $WS"
-  center "${MUTED}Targets:${R}    $(existing_targets | grep -c .) active"
-  center "${MUTED}Engine:${R}     H1 API · Katana · Nuclei · Intelligence Scoring · OpenCode Agent"
-  echo ""
-  center "${LINE}────────────────────────────────────────────────────────────${R}"
-  center "${MUTED}Legal First: SIRF in-scope authorized targets.${R}"
-  echo ""
-  if [ "${BASH_LAUNCHER_SKIP_SPLASH:-0}" != "1" ]; then
-    center "Press Enter to enter Mission Control..."
-    read -r -s -n1
-  fi
+    echo ""
+    center "${B}${GOLD}v1.0.0${R} ${MUTED}—${R} ${B}${CYAN}MISSION CONTROL — AUTONOMOUS BUG BOUNTY SUITE${R}"
+    echo ""
+    center "${MUTED}Workspace:${R}  $WS"
+    center "${MUTED}Targets:${R}    $(existing_targets | grep -c .) active"
+    center "${MUTED}Engine:${R}     H1 API · Katana · Nuclei · Intelligence Scoring · OpenCode Agent"
+    echo ""
+    center "${LINE}────────────────────────────────────────────────────────────${R}"
+    center "${MUTED}Legal First: SIRF in-scope authorized targets.${R}"
+    echo ""
+    if [ "${BASH_LAUNCHER_SKIP_SPLASH:-0}" != "1" ]; then
+      center "Press Enter to enter Mission Control..."
+      read -r -s -n1
+      rc=$?
+      # A trapped signal (WINCH) interrupting `read` reports an exit status
+      # > 128 in bash — that's the "redraw and wait again" case. Anything
+      # else (0 = real keypress, 1 = stdin closed/EOF) must break out, or a
+      # closed/non-interactive stdin with this var unset would spin this
+      # loop forever redrawing instead of just proceeding like the old
+      # single-shot version did.
+      [ "$rc" -le 128 ] && break
+    else
+      break
+    fi
+  done
 }
 
 # =============================================================================
